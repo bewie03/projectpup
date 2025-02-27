@@ -312,6 +312,32 @@ async def on_ready():
     except Exception as e:
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
 
+@bot.event
+async def on_disconnect():
+    """Called when the bot disconnects from Discord"""
+    logger.warning("Bot disconnected from Discord - will attempt to reconnect")
+
+@bot.event
+async def on_resumed():
+    """Called when the bot resumes its connection after a disconnect"""
+    logger.info("Bot connection resumed")
+    # Log guild information again to verify connections
+    for guild in bot.guilds:
+        logger.info(f"Reconnected to guild: {guild.name} (ID: {guild.id})")
+        logger.info(f"Available channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
+
+@bot.event
+async def on_guild_join(guild):
+    """Called when the bot joins a new guild"""
+    logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
+    logger.info(f"Available channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
+
+@bot.event
+async def on_guild_remove(guild):
+    """Called when the bot is removed from a guild"""
+    logger.warning(f"Removed from guild: {guild.name} (ID: {guild.id})")
+    # Don't remove trackers - they might add the bot back
+
 # Store active tracking configurations
 active_trackers = {}
 
@@ -375,11 +401,7 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                     break
                     
         if not channel:
-            logger.error(f"Channel {tracker.channel_id} not found in any guild")
-            # Remove tracker since channel is not accessible
-            if tracker.policy_id in active_trackers:
-                del active_trackers[tracker.policy_id]
-            database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
+            logger.error(f"Channel {tracker.channel_id} not found in any guild - skipping notification but keeping tracker")
             return
             
         # Create appropriate embed based on transaction type
@@ -405,9 +427,9 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                     logger.error(f"Bot does not have permission to send messages in channel {tracker.channel_id}")
                 except Exception as e:
                     logger.error(f"Error sending transfer notification to channel {tracker.channel_id}: {str(e)}")
-                
+                    
     except Exception as e:
-        logger.error(f"Error sending transaction notification: {str(e)}", exc_info=True)
+        logger.error(f"Error sending notification: {str(e)}", exc_info=True)
 
 def get_token_info(policy_id: str):
     """Get token information including metadata and decimals"""
