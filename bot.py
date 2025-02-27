@@ -257,7 +257,8 @@ active_trackers = {}
 class TokenTracker:
     def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
                  image_url: str = None, threshold: float = 1000.0, 
-                 track_transfers: bool = True, last_block: int = None):
+                 track_transfers: bool = True, last_block: int = None,
+                 trade_notifications: int = 0, transfer_notifications: int = 0):
         self.policy_id = policy_id
         self.channel_id = channel_id
         self.token_name = token_name
@@ -265,9 +266,19 @@ class TokenTracker:
         self.threshold = threshold
         self.track_transfers = track_transfers
         self.last_block = last_block
+        self.trade_notifications = trade_notifications
+        self.transfer_notifications = transfer_notifications
         
     def __str__(self):
         return f"TokenTracker(policy_id={self.policy_id}, token_name={self.token_name}, channel_id={self.channel_id})"
+
+    def increment_trade_notifications(self):
+        """Increment the trade notifications counter"""
+        self.trade_notifications += 1
+
+    def increment_transfer_notifications(self):
+        """Increment the transfer notifications counter"""
+        self.transfer_notifications += 1
 
 async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
     """Send a notification about a transaction to the appropriate Discord channel"""
@@ -284,6 +295,10 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         # Create embed
         embed = discord.Embed(
             title=f"{token_name} Transaction Detected!",
+            description=(
+                f"Transaction Hash: [`{details.get('hash', '')[:8]}...{details.get('hash', '')[-8:]}`](https://pool.pm/tx/{details.get('hash', '')})\n"
+                f"Block Height: `{details.get('block_height', '')}`"
+            ),
             color=discord.Color.blue()
         )
         
@@ -327,6 +342,12 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         
         # Send the notification
         await channel.send(embed=embed)
+        
+        # Increment notification counter
+        if tx_type == 'dex_trade':
+            tracker.increment_trade_notifications()
+        elif tx_type == 'wallet_transfer':
+            tracker.increment_transfer_notifications()
         
     except Exception as e:
         logger.error(f"Error sending notification: {str(e)}", exc_info=True)
