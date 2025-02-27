@@ -1045,43 +1045,104 @@ async def help_command(interaction: discord.Interaction):
 async def status(interaction: discord.Interaction):
     """Show status of tracked tokens in this channel"""
     try:
-        # Create embed
-        embed = discord.Embed(
-            title="Token Tracking Status",
-            description="Currently tracked tokens in this channel:",
-            color=discord.Color.blue()
-        )
+        # Get all trackers for this channel
+        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
+        
+        if not channel_trackers:
+            embed = discord.Embed(
+                title="❌ No Active Trackers",
+                description="No tokens are currently being tracked in this channel.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed)
+            return
 
-        for policy_id, tracker in active_trackers.items():
-            # Only show trackers for this channel
-            if tracker.channel_id != interaction.channel_id:
-                continue
-
-            token_name = tracker.token_name
+        # Create an embed for each tracker
+        for tracker in channel_trackers:
+            embed = discord.Embed(
+                title=f"✅ Token Tracking Active",
+                description=f"Currently tracking the following token:",
+                color=discord.Color.green()
+            )
             
-            # Add field for each token
+            # Basic token info
             embed.add_field(
-                name=token_name,
+                name="Token:",
+                value=tracker.token_name,
+                inline=True
+            )
+            embed.add_field(
+                name="Policy ID:",
+                value=f"`{tracker.policy_id}`",
+                inline=False
+            )
+
+            # Configuration section
+            embed.add_field(
+                name="⚙️ Configuration",
                 value=(
-                    f"Policy ID: `{policy_id}`\n"
-                    f"Threshold: `{tracker.threshold:,.2f}`\n"
-                    f"Transfers: `{'On' if tracker.track_transfers else 'Off'}`\n"
-                    f"Trade Alerts: `{tracker.trade_notifications}`\n"
-                    f"Transfer Alerts: `{tracker.transfer_notifications}`"
+                    f"**Threshold:** {tracker.threshold:,.2f} Tokens\n"
+                    f"**Channel:** <#{tracker.channel_id}>\n"
+                    f"**Transfer Notifications:** {'Enabled' if tracker.track_transfers else 'Disabled'}\n"
+                    f"**Image URL:** {tracker.image_url or 'Not set'}"
                 ),
                 inline=False
             )
 
-            # Set thumbnail to the first token's image
-            if tracker.image_url and not embed.thumbnail:
+            # Monitoring section
+            embed.add_field(
+                name="🔍 Monitoring",
+                value=(
+                    "• DEX Trades (Buys/Sells)\n"
+                    "• Wallet Transfers\n"
+                    "• Real-time Notifications\n"
+                    "• Customizable Thresholds"
+                ),
+                inline=True
+            )
+
+            # Notifications section
+            embed.add_field(
+                name="🔔 Notifications",
+                value=(
+                    "• Trade Amount\n"
+                    "• Wallet Addresses\n"
+                    "• Block Height\n"
+                    "• Transaction Hash"
+                ),
+                inline=True
+            )
+
+            # Stats
+            embed.add_field(
+                name="📊 Statistics",
+                value=(
+                    f"**Trade Notifications:** {tracker.trade_notifications}\n"
+                    f"**Transfer Notifications:** {tracker.transfer_notifications}\n"
+                    f"**Last Block:** {tracker.last_block or 'None'}"
+                ),
+                inline=False
+            )
+
+            # Set footer with tracking start time
+            embed.set_footer(text=f"Started tracking at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+            # Set token image if available
+            if tracker.image_url:
                 embed.set_thumbnail(url=tracker.image_url)
 
-        # Send the embed without any view/buttons
-        await interaction.response.send_message(embed=embed)
+            # Add control buttons
+            view = TokenControls(tracker.policy_id)
+            await interaction.response.send_message(embed=embed, view=view)
 
     except Exception as e:
         logger.error(f"Error in status command: {str(e)}", exc_info=True)
-        await interaction.response.send_message("Failed to get status. Please try again.", ephemeral=True)
+        error_embed = discord.Embed(
+            title="❌ Error",
+            description="Failed to retrieve token tracking status.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=error_embed)
 
 @bot.tree.command(name="stop", description="Stop tracking all tokens in this channel")
 async def stop(interaction: discord.Interaction):
