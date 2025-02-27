@@ -1027,10 +1027,10 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
         f"**Threshold:** ```{threshold:,.2f} Tokens```\n"
         f"**Channel:** <#{interaction.channel_id}>\n"
         f"**Transfer Notifications:** ```{'Enabled' if track_transfers else 'Disabled'}```\n"
-        f"**Image:** [View]({image_url})"
+
     )
     embed.add_field(
-        name="Configuration\n\n",
+        name="\n\n",
         value=config_text,
         inline=False
     )
@@ -1041,7 +1041,7 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
         f"**Transfer Notifications:** ```0```\n"
     )
     embed.add_field(
-        name="Statistics\n\n",
+        name="\n\n",
         value=stats_text,
         inline=False
     )
@@ -1064,7 +1064,7 @@ async def start(interaction: discord.Interaction):
 async def help_command(interaction: discord.Interaction):
     """Display help information about the bot's commands"""
     embed = discord.Embed(
-        title="🐾 PUP Bot Help",
+        title="Help",
         description="Track Cardano token transactions with real-time notifications!",
         color=discord.Color.blue()
     )
@@ -1194,28 +1194,79 @@ async def status_command(interaction: discord.Interaction):
 async def stop(interaction: discord.Interaction):
     """Stop tracking all tokens in this channel"""
     try:
-        # Get the channel ID
-        channel_id = interaction.channel_id
-        
-        # Stop all trackers for this channel
-        stop_all_trackers_for_channel(channel_id)
-        
-        # Create success embed
+        # Check if there are any trackers for this channel
+        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
+        if not channel_trackers:
+            await interaction.response.send_message("No tokens are being tracked in this channel.", ephemeral=True)
+            return
+
+        # Create confirmation embed
         embed = discord.Embed(
-            title="✅ Token Tracking Stopped",
-            description="All token tracking has been stopped for this channel.",
-            color=discord.Color.green()
+            title="⚠️ Stop Token Tracking",
+            description="Are you sure you want to stop tracking all tokens in this channel?\nThis action cannot be undone.",
+            color=discord.Color.yellow()
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # List tokens that will be removed
+        tokens_list = "\n".join([f"• {t.token_name} (`{t.policy_id}`)" for t in channel_trackers])
+        embed.add_field(name="Tokens to remove:", value=tokens_list, inline=False)
+
+        # Create confirmation buttons
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)  # 60 second timeout
+
+            @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                """Stop tracking the token"""
+                try:
+                    # Remove from database
+                    database.remove_all_trackers_for_channel(interaction.channel_id)
         
+                    # Remove from active trackers
+                    policies_to_remove = []
+                    for policy_id, tracker in active_trackers.items():
+                        if tracker.channel_id == interaction.channel_id:
+                            policies_to_remove.append(policy_id)
+                    
+                    for policy_id in policies_to_remove:
+                        del active_trackers[policy_id]
+
+                    # Disable buttons
+                    for child in self.children:
+                        child.disabled = True
+                    
+                    # Update message
+                    embed = discord.Embed(
+                        title="✅ Token Tracking Stopped",
+                        description="Successfully stopped tracking all tokens in this channel.",
+                        color=discord.Color.green()
+                    )
+                    await interaction.response.edit_message(embed=embed, view=self)
+                except Exception as e:
+                    logger.error(f"Error stopping token tracking: {str(e)}", exc_info=True)
+                    await interaction.response.send_message("Failed to stop token tracking. Please try again.", ephemeral=True)
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                # Disable buttons
+                for child in self.children:
+                    child.disabled = True
+                
+                # Update message
+                embed = discord.Embed(
+                    title="❌ Operation Cancelled",
+                    description="Token tracking will continue.",
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=self)
+
+        # Send confirmation message
+        await interaction.response.send_message(embed=embed, view=ConfirmView())
+
     except Exception as e:
         logger.error(f"Error in stop command: {str(e)}", exc_info=True)
-        error_embed = discord.Embed(
-            title="❌ Error",
-            description="Failed to stop token tracking.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+        await interaction.response.send_message("Failed to process stop command. Please try again.", ephemeral=True)
 
 # Run the bot
 if __name__ == "__main__":
