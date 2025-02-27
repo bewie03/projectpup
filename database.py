@@ -43,6 +43,11 @@ class TokenTracker(Base):
             'transfer_notifications': self.transfer_notifications
         }
 
+    def __init__(self, policy_id, channel_id, image_url):
+        self.policy_id = policy_id
+        self.channel_id = channel_id
+        self.image_url = image_url
+
 class Database:
     """Database connection and operations handler"""
     def __init__(self, database_url=None):
@@ -96,6 +101,18 @@ class Database:
         try:
             trackers = session.query(TokenTracker).all()
             return [tracker.to_dict() for tracker in trackers]
+        except SQLAlchemyError as e:
+            logger.error(f"Database error while retrieving token trackers: {str(e)}", exc_info=True)
+            return []
+        finally:
+            session.close()
+
+    def get_trackers(self):
+        """Get all token trackers from the database."""
+        session = self.Session()
+        try:
+            trackers = session.query(TokenTracker).all()
+            return trackers
         except SQLAlchemyError as e:
             logger.error(f"Database error while retrieving token trackers: {str(e)}", exc_info=True)
             return []

@@ -186,7 +186,7 @@ async def transaction_webhook(request: Request):
                 continue
                 
             # Check if any of our tracked tokens are involved
-            trackers = db.get_all_token_trackers()
+            trackers = db.get_trackers()
             for tracker in trackers:
                 # Check inputs and outputs for our policy ID
                 is_involved = False
@@ -222,6 +222,33 @@ async def transaction_webhook(request: Request):
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+def run_webhook_server():
+    """Run the FastAPI webhook server"""
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
+
+@bot.event
+async def on_ready():
+    """Called when the bot is ready"""
+    logger.info(f"Bot is ready: {bot.user}")
+    
+    # Start the webhook server in a separate thread
+    threading.Thread(target=run_webhook_server, daemon=True).start()
+    
+    # Load trackers from database
+    try:
+        saved_trackers = db.get_trackers()  # Using the correct function name
+        for tracker in saved_trackers:
+            active_trackers[tracker.policy_id] = tracker
+            logger.info(f"Loaded tracker for policy {tracker.policy_id}")
+    except Exception as e:
+        logger.error(f"Failed to load trackers from database: {str(e)}", exc_info=True)
+
+    try:
+        synced = await bot.tree.sync()
+        logger.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logger.error(f"Error syncing commands: {str(e)}", exc_info=True)
 
 # Store active tracking configurations
 active_trackers = {}
@@ -1013,75 +1040,6 @@ async def stop(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Error in stop command: {str(e)}", exc_info=True)
         await interaction.response.send_message("Failed to process stop command. Please try again.", ephemeral=True)
-
-def run_webhook_server():
-    """Run the FastAPI webhook server"""
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
-
-async def setup_webhook():
-    """Set up the webhook with Blockfrost"""
-    try:
-        # Get the app's URL from environment
-        app_url = os.getenv('APP_URL')
-        if not app_url:
-            logger.warning("APP_URL not set, cannot set up webhook")
-            return
-            
-        webhook_url = f"{app_url.rstrip('/')}/webhook/transaction"
-        
-        # Get existing webhooks
-        webhooks = api.webhooks()
-        
-        # Check if our webhook already exists
-        exists = any(w.url == webhook_url for w in webhooks)
-        if not exists:
-            # Create new webhook
-            webhook = api.webhook_create(
-                url=webhook_url,
-                enabled=True,
-                policy_id=None,  # We'll filter policies in our code
-                triggers=['tx']
-            )
-            logger.info(f"Created new webhook: {webhook}")
-    except Exception as e:
-        logger.error(f"Error setting up webhook: {str(e)}", exc_info=True)
-
-@bot.event
-async def on_ready():
-    """Called when the bot is ready"""
-    logger.info(f"Bot is ready: {bot.user}")
-    
-    # Set up webhook
-    await setup_webhook()
-    
-    # Start the webhook server in a separate thread
-    threading.Thread(target=run_webhook_server, daemon=True).start()
-    
-    # Load trackers from database
-    try:
-        saved_trackers = db.get_all_token_trackers()
-        for tracker_data in saved_trackers:
-            tracker = TokenTracker(
-                policy_id=tracker_data['policy_id'],
-                token_name=tracker_data['token_name'],
-                image_url=tracker_data.get('image_url'),
-                threshold=tracker_data['threshold'],
-                channel_id=tracker_data['channel_id'],
-                last_block=tracker_data.get('last_block'),
-                track_transfers=tracker_data.get('track_transfers', True),
-                trade_notifications=tracker_data.get('trade_notifications', 0),
-                transfer_notifications=tracker_data.get('transfer_notifications', 0)
-            )
-            active_trackers[tracker.policy_id] = tracker
-            logger.info(f"Loaded tracker from database: {tracker_data['policy_id']}")
-    except Exception as e:
-        logger.error(f"Failed to load trackers from database: {str(e)}", exc_info=True)
-
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logger.error(f"Error syncing commands: {str(e)}", exc_info=True)
 
 # Run the bot
 if __name__ == "__main__":
