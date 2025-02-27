@@ -848,14 +848,10 @@ class TokenControls(discord.ui.View):
                 color=discord.Color.blue()
             )
             
-            # Get decimals from token_info
-            decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
-            
             # Basic token info
             token_text = (
                 f"**Policy ID:** ```{tracker.policy_id}```\n"
-                f"**Name:** ```{tracker.token_name}```\n"
-                f"**Decimals:** ```{decimals}```"
+                f"**Name:** ```{tracker.token_name}```"
             )
             embed.add_field(
                 name="Token Information",
@@ -866,12 +862,10 @@ class TokenControls(discord.ui.View):
             # Configuration section
             config_text = (
                 f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
-                f"**Channel:** <#{tracker.channel_id}>\n"
                 f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
-                f"**Image:** [View]({tracker.image_url})" if tracker.image_url else ""
             )
             embed.add_field(
-                name="Configuration",
+                name="",
                 value=config_text,
                 inline=False
             )
@@ -879,10 +873,10 @@ class TokenControls(discord.ui.View):
             # Statistics
             stats_text = (
                 f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
-                f"**Transfer Notifications:** ```{tracker.transfer_notifications}```"
+                f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
             )
             embed.add_field(
-                name="Statistics",
+                name="",
                 value=stats_text,
                 inline=False
             )
@@ -1183,23 +1177,22 @@ async def status_command(interaction: discord.Interaction):
             )
             
             # Basic token info
-            embed.add_field(
-                name="Token",
-                value=f"```{tracker.token_name}```",
-                inline=True
+            token_text = (
+                f"**Policy ID:** ```{tracker.policy_id}```\n"
+                f"**Name:** ```{tracker.token_name}```"
             )
             embed.add_field(
-                name="Policy ID",
-                value=f"```{tracker.policy_id}```",
+                name="Token Information",
+                value=token_text,
                 inline=False
             )
             
             # Configuration section
             config_text = (
                 f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
-
+                f"**Channel:** <#{tracker.channel_id}>\n"
                 f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
-
+                f"**Image:** [View]({tracker.image_url})" if tracker.image_url else ""
             )
             embed.add_field(
                 name="",
