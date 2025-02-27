@@ -1132,7 +1132,7 @@ async def status(interaction: discord.Interaction):
             embed = discord.Embed(
                 title="✅ Token Tracking Active",
                 description="Currently tracking the following token:",
-                color=discord.Color.green()
+                color=discord.Color.blue()
             )
             
             # Basic token info
@@ -1155,7 +1155,7 @@ async def status(interaction: discord.Interaction):
                 f"**Image:** [View]({tracker.image_url})"
             )
             embed.add_field(
-                name="⚙️ Configuration",
+                name="Configuration\n\n",
                 value=config_text,
                 inline=False
             )
@@ -1164,10 +1164,10 @@ async def status(interaction: discord.Interaction):
             stats_text = (
                 f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
                 f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
-                f"**Last Block:** ```{tracker.last_block or 'None'}```"
+
             )
             embed.add_field(
-                name="📊 Statistics",
+                name="Statistics\n\n",
                 value=stats_text,
                 inline=False
             )
