@@ -155,84 +155,55 @@ def analyze_transaction_improved(tx_details, policy_id):
     """
     Enhanced transaction analysis that detects DEX trades by analyzing transaction patterns
     Returns: (type, ada_amount, token_amount, details)
-    type can be 'dex_trade', 'wallet_transfer', or None
     """
     try:
-        # Initialize transaction analysis
-        input_addresses = set()
-        output_addresses = set()
-        input_tokens = 0
-        output_tokens = 0
-        input_ada = 0
-        output_ada = 0
-        
-        # Analyze inputs
-        for inp in tx_details.inputs:
-            input_addresses.add(inp.address)
-            for amount in inp.amount:
-                if amount.unit.startswith(policy_id):
-                    input_tokens += int(amount.quantity)
-                elif amount.unit == "lovelace":
-                    input_ada += int(amount.quantity) / 1_000_000
+        # Get the utxos
+        utxos = tx_details.utxos if hasattr(tx_details, 'utxos') else None
+        if not utxos:
+            logger.warning(f"No UTXOs found in transaction")
+            return 'unknown', 0, 0, {}
 
-        # Analyze outputs
-        for out in tx_details.outputs:
-            output_addresses.add(out.address)
-            for amount in out.amount:
-                if amount.unit.startswith(policy_id):
-                    output_tokens += int(amount.quantity)
-                elif amount.unit == "lovelace":
-                    output_ada += int(amount.quantity) / 1_000_000
+        # Initialize amounts
+        ada_amount = 0
+        token_amount = 0
+        details = {}
 
-        # Calculate net movements
-        ada_movement = abs(output_ada - input_ada)
-        token_movement = abs(output_tokens - input_tokens)
+        # Check inputs and outputs for the policy ID
+        has_policy_in_input = False
+        has_policy_in_output = False
         
-        # Transaction pattern analysis
-        details = {
-            "addresses": {
-                "input": list(input_addresses),
-                "output": list(output_addresses)
-            },
-            "movements": {
-                "ada": ada_movement,
-                "tokens": token_movement
-            }
-        }
+        # Check inputs
+        for utxo in utxos.inputs:
+            if hasattr(utxo, 'amount'):
+                for amount in utxo.amount:
+                    if hasattr(amount, 'unit') and policy_id in amount.unit:
+                        has_policy_in_input = True
+                        token_amount += int(amount.quantity)
+                    elif hasattr(amount, 'unit') and amount.unit == 'lovelace':
+                        ada_amount += int(amount.quantity)
 
-        # DEX Trade Pattern Detection:
-        # 1. Significant ADA movement (> 1 ADA)
-        # 2. Token amount changes
-        # 3. Multiple addresses involved (typically DEX contracts)
-        # 4. Complex transaction structure
-        is_likely_dex = (
-            ada_movement > 1 and  # Significant ADA movement
-            len(input_addresses) + len(output_addresses) > 3 and  # Multiple addresses involved
-            (
-                (input_tokens == 0 and output_tokens > 0) or  # Buying tokens
-                (input_tokens > 0 and output_tokens == 0)     # Selling tokens
-            )
-        )
-        
-        if is_likely_dex:
-            trade_type = "buy" if output_tokens > input_tokens else "sell"
-            details["trade_type"] = trade_type
-            return 'dex_trade', ada_movement, token_movement, details
-        
-        # Wallet Transfer Pattern:
-        # 1. Minimal ADA movement (just fees)
-        # 2. Tokens moving between addresses
-        # 3. Simple transaction structure
-        elif input_tokens > 0 and output_tokens > 0:  # Tokens moving
-            if input_addresses != output_addresses:  # Different addresses
-                if ada_movement <= 1:  # Only fee-level ADA movement
-                    return 'wallet_transfer', ada_movement, token_movement, details
+        # Check outputs
+        for utxo in utxos.outputs:
+            if hasattr(utxo, 'amount'):
+                for amount in utxo.amount:
+                    if hasattr(amount, 'unit') and policy_id in amount.unit:
+                        has_policy_in_output = True
+                        token_amount = max(token_amount, int(amount.quantity))
 
-        return None, 0, 0, details
+        # Convert lovelace to ADA
+        ada_amount = ada_amount / 1_000_000
+
+        # Determine transaction type
+        if has_policy_in_input and has_policy_in_output:
+            return 'wallet_transfer', ada_amount, token_amount, details
+        elif has_policy_in_input or has_policy_in_output:
+            return 'dex_trade', ada_amount, token_amount, details
+        else:
+            return 'unknown', ada_amount, token_amount, details
 
     except Exception as e:
-        logger.error(f"Error in improved transaction analysis: {str(e)}", exc_info=True)
-        return None, 0, 0, {"error": str(e)}
+        logger.error(f"Error in analyze_transaction_improved: {str(e)}", exc_info=True)
+        return 'unknown', 0, 0, {}
 
 def create_pool_pm_link(address):
     """Creates a pool.pm link for a Cardano address"""
@@ -896,119 +867,106 @@ async def check_transactions():
                 
                 # Get transactions since last check with pagination
                 all_transactions = []
-                page = 1
-                while True:
-                    try:
-                        # Get transactions for current page
-                        transactions = api.asset_transactions(
-                            asset=full_asset_id,
-                            count=100,  # Max allowed per page
-                            page=page,
-                            order='desc'  # Get newest first
-                        )
-                        if isinstance(transactions, Exception):
-                            raise transactions
+                try:
+                    # Get transactions for current page
+                    transactions = api.asset_transactions(
+                        asset=full_asset_id,
+                        count=20,  # Limit to 20 most recent transactions
+                        page=1,
+                        order='desc'  # Get newest first
+                    )
+                    if isinstance(transactions, Exception):
+                        raise transactions
                         
-                        # No more transactions
-                        if not transactions:
-                            break
-                            
-                        logger.info(f"Found {len(transactions)} transactions on page {page}")
+                    # No more transactions
+                    if not transactions:
+                        continue
                         
-                        # Filter transactions based on block height if we have a last_block
-                        if tracker.last_block:
-                            transactions = [tx for tx in transactions if tx.block_height > tracker.last_block]
-                            
-                        # Add filtered transactions
-                        all_transactions.extend(transactions)
+                    logger.info(f"Found {len(transactions)} transactions on page 1")
                         
-                        # If we got less than 100 transactions, we've hit the end
-                        if len(transactions) < 100:
-                            break
-                            
-                        page += 1
+                    # Filter transactions based on block height if we have a last_block
+                    if tracker.last_block:
+                        transactions = [tx for tx in transactions if tx.block_height > tracker.last_block]
                         
-                    except Exception as tx_e:
-                        if hasattr(tx_e, 'status_code'):
-                            if tx_e.status_code == 404:
-                                logger.warning(f"Asset {full_asset_id} not found. Using policy endpoint...")
-                                # Fallback to getting all assets under the policy
-                                try:
-                                    # Get all assets under this policy
-                                    policy_assets = api.assets_policy(policy_id)
-                                    if isinstance(policy_assets, Exception):
-                                        raise policy_assets
-                                        
-                                    all_transactions = []
-                                    logger.info(f"Found {len(policy_assets)} assets under policy")
+                    # Add filtered transactions
+                    all_transactions.extend(transactions)
+                    
+                except Exception as tx_e:
+                    if hasattr(tx_e, 'status_code'):
+                        if tx_e.status_code == 404:
+                            logger.warning(f"Asset {full_asset_id} not found. Using policy endpoint...")
+                            # Fallback to getting all assets under the policy
+                            try:
+                                # Get all assets under this policy
+                                policy_assets = api.assets_policy(policy_id)
+                                if isinstance(policy_assets, Exception):
+                                    raise policy_assets
                                     
-                                    # Debug log the first asset's structure
-                                    if policy_assets:
-                                        first_asset = policy_assets[0]
-                                        logger.info(f"Asset structure: {vars(first_asset)}")
+                                all_transactions = []
+                                logger.info(f"Found {len(policy_assets)} assets under policy")
                                     
-                                    # Get transactions for each asset
-                                    for asset in policy_assets:
-                                        try:
-                                            # Get the asset ID - it's already the full ID (policy_id + hex name)
-                                            asset_id = asset.asset
-                                            
-                                            logger.info(f"Processing asset: {asset_id}")
-                                            
-                                            page = 1
-                                            while True:
-                                                # Get transactions for this asset
-                                                asset_txs = api.asset_transactions(
-                                                    asset=asset_id,
-                                                    count=100,
-                                                    page=page,
-                                                    order='desc'
-                                                )
-                                                
-                                                if isinstance(asset_txs, Exception):
-                                                    raise asset_txs
-                                                if not asset_txs:
-                                                    break
-                                                    
-                                                # Filter by block height if needed
-                                                if tracker.last_block:
-                                                    asset_txs = [tx for tx in asset_txs if tx.block_height > tracker.last_block]
-                                                    
-                                                all_transactions.extend(asset_txs)
-                                                logger.info(f"Found {len(asset_txs)} transactions for asset {asset_id} on page {page}")
-                                                
-                                                # If we got less than 100, we've hit the end
-                                                if len(asset_txs) < 100:
-                                                    break
-                                                    
-                                                page += 1
-                                                
-                                        except Exception as asset_e:
-                                            logger.error(f"Error getting transactions for asset {asset_id if 'asset_id' in locals() else 'unknown'}: {str(asset_e)}", exc_info=True)
+                                # Debug log the first asset's structure
+                                if policy_assets:
+                                    first_asset = policy_assets[0]
+                                    logger.info(f"Asset structure: {vars(first_asset)}")
+                                    
+                                # Get transactions for each asset
+                                for asset in policy_assets:
+                                    try:
+                                        # Get the asset ID - it's already the full ID (policy_id + hex name)
+                                        if not hasattr(asset, 'asset'):
+                                            logger.warning(f"Could not find asset ID in object with attributes: {vars(asset)}")
                                             continue
                                             
-                                    # Remove duplicates by tx_hash
-                                    seen = set()
-                                    unique_txs = []
-                                    for tx in all_transactions:
-                                        if tx.tx_hash not in seen:
-                                            seen.add(tx.tx_hash)
-                                            unique_txs.append(tx)
-                                    all_transactions = unique_txs
-                                    
-                                    logger.info(f"Found total of {len(all_transactions)} unique transactions across all policy assets")
-                                    
-                                except Exception as policy_e:
-                                    logger.error(f"Error getting policy assets: {str(policy_e)}", exc_info=True)
-                                    raise policy_e
-                            elif tx_e.status_code == 429:
-                                logger.warning("Rate limit reached, waiting for next cycle")
-                                break
-                            else:
-                                raise tx_e
+                                        asset_id = asset.asset
+                                        logger.info(f"Processing asset: {asset_id}")
+                                        
+                                        # Only get first page of most recent transactions
+                                        asset_txs = api.asset_transactions(
+                                            asset=asset_id,
+                                            count=20,  # Limit to 20 most recent transactions
+                                            page=1,
+                                            order='desc'  # Newest first
+                                        )
+                                        
+                                        if isinstance(asset_txs, Exception):
+                                            raise asset_txs
+                                        if not asset_txs:
+                                            continue
+                                            
+                                        # Filter by block height if needed
+                                        if tracker.last_block:
+                                            asset_txs = [tx for tx in asset_txs if tx.block_height > tracker.last_block]
+                                            
+                                        all_transactions.extend(asset_txs)
+                                        logger.info(f"Found {len(asset_txs)} recent transactions for asset {asset_id}")
+                                        
+                                    except Exception as asset_e:
+                                        logger.error(f"Error getting transactions for asset {asset_id if 'asset_id' in locals() else 'unknown'}: {str(asset_e)}", exc_info=True)
+                                        continue
+                                        
+                                # Remove duplicates by tx_hash
+                                seen = set()
+                                unique_txs = []
+                                for tx in all_transactions:
+                                    if tx.tx_hash not in seen:
+                                        seen.add(tx.tx_hash)
+                                        unique_txs.append(tx)
+                                all_transactions = unique_txs
+                                
+                                logger.info(f"Found total of {len(all_transactions)} unique recent transactions across all policy assets")
+                                
+                            except Exception as policy_e:
+                                logger.error(f"Error getting policy assets: {str(policy_e)}", exc_info=True)
+                                raise policy_e
+                        elif tx_e.status_code == 429:
+                            logger.warning("Rate limit reached, waiting for next cycle")
+                            break
                         else:
                             raise tx_e
-                        break
+                    else:
+                        raise tx_e
+                    break
 
                 logger.info(f"Processing {len(all_transactions)} total transactions for {policy_id}")
 
