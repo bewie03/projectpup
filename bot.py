@@ -783,66 +783,104 @@ def shorten_address(address):
     return address[:8] + "..." + address[-4:] if len(address) > 12 else address
 
 class TokenControls(discord.ui.View):
-    def __init__(self, policy_id: str):
-        super().__init__(timeout=None)  # Buttons don't timeout
+    def __init__(self, policy_id):
+        super().__init__(timeout=None)  # No timeout for persistent buttons
         self.policy_id = policy_id
 
-    @discord.ui.button(label="🛑 Stop Tracking", style=discord.ButtonStyle.danger, custom_id="stop_tracking")
+    @discord.ui.button(label="Stop Tracking", style=discord.ButtonStyle.danger, emoji="⛔")
     async def stop_tracking(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Stop tracking the token"""
         try:
+            # Remove from database
+            database.remove_tracker(interaction.guild_id, self.policy_id)
+            
+            # Remove from active trackers
             if self.policy_id in active_trackers:
-                # Remove from database
-                try:
-                    database.delete_token_tracker(self.policy_id, interaction.channel_id)
-                except Exception as e:
-                    logger.error(f"Failed to delete token tracker from database: {str(e)}", exc_info=True)
-                
-                # Remove from memory
                 del active_trackers[self.policy_id]
-                
-                embed = discord.Embed(
-                    title="🛑 Tracking Stopped",
-                    description=f"Successfully stopped tracking token with policy ID: `{self.policy_id}`",
-                    color=discord.Color.red()
-                )
-                await interaction.response.edit_message(embed=embed, view=None)
-                logger.info(f"Stopped tracking token: {self.policy_id}")
-            else:
-                await interaction.response.send_message("Not tracking this token anymore.", ephemeral=True)
+            
+            # Update message
+            embed = discord.Embed(
+                title="✅ Token Tracking Stopped",
+                description=f"Successfully stopped tracking token with policy ID: ```{self.policy_id}```",
+                color=discord.Color.green()
+            )
+            
+            # Disable all buttons
+            for child in self.children:
+                child.disabled = True
+            
+            await interaction.response.edit_message(embed=embed, view=self)
+            
         except Exception as e:
-            logger.error(f"Error in stop tracking button: {str(e)}", exc_info=True)
-            await interaction.response.send_message("Failed to stop tracking. Please try again.", ephemeral=True)
+            logger.error(f"Error stopping token tracking: {str(e)}", exc_info=True)
+            await interaction.response.send_message("Failed to stop token tracking. Please try again.", ephemeral=True)
 
-    @discord.ui.button(label="🔄 Toggle Transfers", style=discord.ButtonStyle.primary, custom_id="toggle_transfers")
+    @discord.ui.button(label="Toggle Transfers", style=discord.ButtonStyle.primary, emoji="🔄")
     async def toggle_transfers(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Toggle transfer notifications"""
         try:
-            if self.policy_id in active_trackers:
-                tracker = active_trackers[self.policy_id]
-                tracker.track_transfers = not tracker.track_transfers
-                
-                # Update database
-                try:
-                    database.save_token_tracker({
-                        'policy_id': self.policy_id,
-                        'token_name': tracker.token_name,
-                        'image_url': tracker.image_url,
-                        'threshold': tracker.threshold,
-                        'channel_id': interaction.channel_id,
-                        'last_block': tracker.last_block,
-                        'track_transfers': tracker.track_transfers
-                    })
-                except Exception as e:
-                    logger.error(f"Failed to update token tracker in database: {str(e)}", exc_info=True)
-                
-                status = "enabled" if tracker.track_transfers else "disabled"
-                await interaction.response.send_message(f"Transfer notifications {status} for this token.", ephemeral=True)
-            else:
-                await interaction.response.send_message("Not tracking this token anymore.", ephemeral=True)
+            # Get the tracker
+            tracker = active_trackers.get(self.policy_id)
+            if not tracker:
+                await interaction.response.send_message("❌ Token tracker not found.", ephemeral=True)
+                return
+
+            # Toggle transfer notifications
+            tracker.track_transfers = not tracker.track_transfers
+            
+            # Update in database
+            database.update_tracker_transfers(interaction.guild_id, self.policy_id, tracker.track_transfers)
+
+            # Create updated embed
+            embed = discord.Embed(
+                title="✅ Token Tracking Active",
+                description="Currently tracking the following token:",
+                color=discord.Color.blue()
+            )
+            
+            # Basic token info
+            token_text = (
+                f"**Policy ID:** ```{tracker.policy_id}```\n"
+                f"**Name:** ```{tracker.token_name}```\n"
+                f"**Decimals:** ```{tracker.decimals}```"
+            )
+            embed.add_field(
+                name="Token Information",
+                value=token_text,
+                inline=False
+            )
+            
+            # Configuration section
+            config_text = (
+                f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
+                f"**Channel:** <#{tracker.channel_id}>\n"
+                f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
+                f"**Image:** [View]({tracker.image_url})"
+            )
+            embed.add_field(
+                name="Configuration",
+                value=config_text,
+                inline=False
+            )
+
+            # Statistics
+            stats_text = (
+                f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
+                f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
+            )
+            embed.add_field(
+                name="Statistics",
+                value=stats_text,
+                inline=False
+            )
+
+            # Set token image if available
+            if tracker.image_url:
+                embed.set_thumbnail(url=tracker.image_url)
+
+            await interaction.response.edit_message(embed=embed)
+            
         except Exception as e:
-            logger.error(f"Error in toggle transfers button: {str(e)}", exc_info=True)
-            await interaction.response.send_message("Failed to toggle transfers. Please try again.", ephemeral=True)
+            logger.error(f"Error toggling transfers: {str(e)}", exc_info=True)
+            await interaction.response.send_message("❌ Failed to toggle transfer notifications.", ephemeral=True)
 
 class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
     def __init__(self):
@@ -937,28 +975,33 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             
             # Create success embed
             embed = discord.Embed(
-                title="✅ Token Tracking Started",
-                description=(
-                    f"Successfully initialized tracking for:\n"
-                    f"**Token:** {tracker.token_name}\n"
-                    f"**Policy ID:** `{tracker.policy_id}`"
-                ),
-                color=discord.Color.green()
+                title="Token Tracking Started",
+                description="Successfully initialized tracking for:",
+                color=discord.Color.blue()
             )
             
-            # Add token image if available
-            if tracker.image_url:
-                embed.set_thumbnail(url=tracker.image_url)
-            
-            # Add configuration fields
+            # Basic token info
             embed.add_field(
-                name="⚙️ Configuration",
-                value=(
-                    f"**Threshold:** `{threshold:,.2f} Tokens`\n"
+                name="Token",
+                value=f"```{tracker.token_name}```",
+                inline=True
+            )
+            embed.add_field(
+                name="Policy ID",
+                value=f"```{tracker.policy_id}```",
+                inline=False
+            )
+            
+            # Configuration section
+            config_text = (
+                f"**Threshold:** ```{threshold:,.2f} Tokens```\n"
 
-                    f"**Transfer Notifications:** `{'Enabled' if track_transfers else 'Disabled'}`\n"
+                f"**Transfer Notifications:** ```{'Enabled' if track_transfers else 'Disabled'}```\n"
 
-                ),
+            )
+            embed.add_field(
+                name="",
+                value=config_text,
                 inline=False
             )
 
@@ -973,32 +1016,11 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 inline=False
             )
 
-            # Add monitoring details
-            embed.add_field(
-                name="📊 Monitoring",
-                value=(
-                    "• DEX Trades (Buys/Sells)\n"
-                    "• Wallet Transfers\n"
-                    "• Real-time Notifications\n"
-                    "• Customizable Thresholds"
-                ),
-                inline=True
-            )
-            
-            # Add notification details
-            embed.add_field(
-                name="🔔 Notifications",
-                value=(
-                    "• Trade Amount\n"
-                    "• Wallet Addresses\n"
-                    "• Block Height\n"
-                    "• Transaction Hash"
-                ),
-                inline=True
-            )
-            
-            # Add footer with timestamp
-            embed.set_footer(text=f"Started tracking at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            # Set token image if available
+            if tracker.image_url:
+                embed.set_thumbnail(url=tracker.image_url)
+
+
             
             # Create view with buttons
             view = TokenControls(tracker.policy_id)
@@ -1048,7 +1070,7 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
 
     )
     embed.add_field(
-        name="\n\n",
+        name="",
         value=config_text,
         inline=False
     )
@@ -1171,7 +1193,7 @@ async def status_command(interaction: discord.Interaction):
 
             # Statistics
             stats_text = (
-                f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
+                f"**Sale Notifications:** ```{tracker.trade_notifications}```\n"
                 f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
             )
             embed.add_field(
