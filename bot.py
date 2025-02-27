@@ -193,26 +193,13 @@ async def transaction_webhook(request: Request):
                 logger.warning(f"Skipping transaction {tx_hash} - Missing required data")
                 continue
                 
-            # Get all trackers and check each transaction against them
-            trackers = database.get_trackers()
-            logger.info(f"Checking transaction against {len(trackers)} tracked tokens")
+            # Check transaction against active trackers in memory
+            logger.info(f"Checking transaction against {len(active_trackers)} tracked tokens")
             
-            for tracker in trackers:
+            for tracker_key, active_tracker in active_trackers.items():
                 try:
-                    # Create composite key from policy_id and channel_id
-                    tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
-                    
-                    # Skip if tracker not in memory (shouldn't happen)
-                    if tracker_key not in active_trackers:
-                        logger.warning(f"Tracker {tracker_key} not found in memory, skipping")
-                        continue
-                        
-                    # Get active tracker from memory
-                    active_tracker = active_trackers[tracker_key]
-                    
                     # Process transaction for this tracker
                     await process_transaction_for_tracker(active_tracker, tx, inputs, outputs, tx_hash)
-                    
                 except Exception as e:
                     logger.error(f"Error processing transaction for tracker {tracker_key}: {str(e)}", exc_info=True)
                     continue
@@ -340,6 +327,9 @@ async def on_ready():
         if not check_transactions.is_running():
             check_transactions.start()
             
+        if not refresh_trackers.is_running():
+            refresh_trackers.start()
+            
         logger.info(f"{bot.user} is ready and online!")
         
     except Exception as e:
@@ -411,8 +401,7 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
             logger.error(f"Channel {tracker.channel_id} not found in any guild")
             # Remove tracker since channel is not accessible
             tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
-            if tracker_key in active_trackers:
-                del active_trackers[tracker_key]
+            del active_trackers[tracker_key]
             database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
             return
             
