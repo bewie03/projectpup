@@ -54,6 +54,10 @@ class Database:
         if not self.database_url:
             raise ValueError("No database URL provided")
             
+        # Handle Heroku's updated postgres:// to postgresql:// URL format
+        if self.database_url.startswith("postgres://"):
+            self.database_url = self.database_url.replace("postgres://", "postgresql://", 1)
+            
         # Create engine and session
         self.engine = create_engine(self.database_url)
         self.Session = sessionmaker(bind=self.engine)
