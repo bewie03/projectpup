@@ -362,18 +362,31 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
             logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}, skipping notification")
             return
             
-        # Try to get the channel from cache first
-        channel = bot.get_channel(tracker.channel_id)
+        # Try to get the channel with retries
+        channel = None
+        max_retries = 3
+        retry_delay = 1  # seconds
         
-        # If not in cache, try to find it in guilds
-        if not channel:
-            for guild in bot.guilds:
-                channel = guild.get_channel(tracker.channel_id)
-                if channel:
-                    break
+        for attempt in range(max_retries):
+            # Try to get the channel from cache first
+            channel = bot.get_channel(tracker.channel_id)
+            
+            # If not in cache, try to find it in guilds
+            if not channel:
+                for guild in bot.guilds:
+                    channel = guild.get_channel(tracker.channel_id)
+                    if channel:
+                        break
+                        
+            if channel:
+                break
+                
+            if attempt < max_retries - 1:
+                logger.info(f"Channel {tracker.channel_id} not found, retrying in {retry_delay} seconds (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(retry_delay)
                     
         if not channel:
-            logger.error(f"Channel {tracker.channel_id} not found in any guild")
+            logger.error(f"Channel {tracker.channel_id} not found in any guild after {max_retries} attempts")
             # Remove tracker since channel is not accessible
             if tracker.policy_id in active_trackers:
                 del active_trackers[tracker.policy_id]
