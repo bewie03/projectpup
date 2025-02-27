@@ -240,7 +240,7 @@ async def transaction_webhook(request: Request):
                     details['hash'] = tx_hash
                     
                     # Log analysis results
-                    logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:,}")
+                    logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
                     
                     # Send notification
                     await send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details)
@@ -320,86 +320,35 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
     try:
         # Get decimals for threshold comparison
         decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
-        human_readable_amount = token_amount / (10 ** decimals)
+        human_readable_amount = token_amount
         
         # Check if the token amount meets the threshold
         if human_readable_amount < tracker.threshold:
             logger.info(f"Token amount {human_readable_amount} below threshold {tracker.threshold}, skipping notification")
             return
             
-        # For transfers, check if we should track them
-        if tx_type == 'wallet_transfer' and not tracker.track_transfers:
-            logger.info("Transfer tracking disabled, skipping notification")
-            return
-
+        # Get the channel
         channel = bot.get_channel(tracker.channel_id)
         if not channel:
             logger.error(f"Could not find channel {tracker.channel_id}")
             return
             
-        # Get token info
-        token_info = await get_token_info(tracker.policy_id)
-        token_name = token_info.get('name', 'Unknown Token')
-        
-        # Create embed
-        embed = discord.Embed(
-            title=f"{token_name} Transaction Detected!",
-            description=(
-                f"Transaction Hash: [`{details.get('hash', '')[:8]}...{details.get('hash', '')[-8:]}`](https://pool.pm/tx/{details.get('hash', '')})\n"
-                f"Block Height: `{details.get('block_height', '')}`"
-            ),
-            color=discord.Color.blue()
-        )
-        
-        # Add transaction details
-        if tx_type == 'dex_trade':
-            embed.add_field(
-                name="Transaction Type",
-                value="DEX Trade",
-                inline=False
-            )
-        elif tx_type == 'wallet_transfer':
-            embed.add_field(
-                name="Transaction Type",
-                value="Wallet Transfer",
-                inline=False
-            )
-        
-        # Add amounts
-        if ada_amount:
-            embed.add_field(
-                name="ADA Amount",
-                value=f"{ada_amount:,.2f} ₳",
-                inline=True
-            )
-        if token_amount:
-            embed.add_field(
-                name="Token Amount",
-                value=format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0)),
-                inline=True
-            )
-            
-        # Add any additional details
-        if details:
-            for key, value in details.items():
-                if key != 'error':  # Don't show error details in Discord
-                    embed.add_field(
-                        name=key.replace('_', ' ').title(),
-                        value=str(value),
-                        inline=False
-                    )
-        
-        # Send the notification
-        await channel.send(embed=embed)
-        
-        # Increment notification counter
-        if tx_type == 'dex_trade':
-            tracker.increment_trade_notifications()
-        elif tx_type == 'wallet_transfer':
-            tracker.increment_transfer_notifications()
-        
+        # Create appropriate embed based on transaction type
+        if tx_type in ['buy', 'sell']:
+            # Create trade embed
+            embed = await create_trade_embed(details, tracker.policy_id, ada_amount, token_amount, tracker, details)
+            if embed:
+                await channel.send(embed=embed)
+                tracker.increment_trade_notifications()
+        elif tx_type == 'wallet_transfer' and tracker.track_transfers:
+            # Create transfer embed
+            embed = await create_transfer_embed(details, tracker.policy_id, token_amount, tracker)
+            if embed:
+                await channel.send(embed=embed)
+                tracker.increment_transfer_notifications()
+                
     except Exception as e:
-        logger.error(f"Error sending notification: {str(e)}", exc_info=True)
+        logger.error(f"Error sending transaction notification: {str(e)}", exc_info=True)
 
 def get_token_info(policy_id: str):
     """Get token information including metadata and decimals"""
@@ -535,6 +484,7 @@ def analyze_transaction_improved(tx_details, policy_id):
         # Get token info for decimal handling
         token_info = get_token_info(policy_id)
         decimals = token_info.get('decimals', 0) if token_info else 0
+        logger.info(f"Using {decimals} decimals for token amount calculations")
 
         # Check inputs
         for inp in inputs:
@@ -560,7 +510,10 @@ def analyze_transaction_improved(tx_details, policy_id):
 
         # Calculate net amounts
         ada_amount = abs(ada_out - ada_in)
-        token_amount = abs(token_out - token_in)
+        raw_token_amount = abs(token_out - token_in)
+        
+        # Convert token amount using decimals
+        token_amount = raw_token_amount / (10 ** decimals)
 
         # Store details for notification
         details = {
@@ -568,7 +521,8 @@ def analyze_transaction_improved(tx_details, policy_id):
             'ada_out': ada_out,
             'token_in': token_in,
             'token_out': token_out,
-            'decimals': decimals
+            'decimals': decimals,
+            'raw_token_amount': raw_token_amount
         }
 
         # Determine transaction type
@@ -648,7 +602,7 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
             trade_info = (
                 "```\n"
                 f"ADA Spent  : {ada_amount:,.2f}\n"
-                f"Tokens Recv: {format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}\n"
+                f"Tokens Recv: {format_token_amount(int(ada_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}\n"
                 f"Price/Token: {(ada_amount/token_amount):.6f}\n"
                 "```"
             )
