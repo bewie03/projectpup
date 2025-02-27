@@ -11,6 +11,16 @@ import sys
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import database as db
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import hmac
+import hashlib
+import uvicorn
+import threading
+import time
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 def setup_logging():
@@ -59,57 +69,233 @@ def setup_logging():
 # Initialize logging
 logger = setup_logging()
 
-# Load environment variables
-load_dotenv()
+# Initialize FastAPI app
+app = FastAPI()
 
-# Initialize database connection
-db = db.Database(os.getenv('DATABASE_URL'))
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Initialize Discord bot with necessary intents
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 
+# Initialize Blockfrost API
+api = BlockFrostApi(
+    project_id=os.getenv('BLOCKFROST_API_KEY'),
+    base_url=ApiUrls.mainnet.value
+)
+
+# Webhook secret for verification
+WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
+WEBHOOK_TOLERANCE_SECONDS = 600  # 10 minutes, same as Blockfrost SDK default
+
+def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> bool:
+    """
+    Verify the Blockfrost webhook signature
+    
+    Args:
+        payload: Raw request body bytes
+        header: Blockfrost-Signature header value
+        current_time: Current Unix timestamp
+    """
+    if not WEBHOOK_SECRET:
+        logger.warning("WEBHOOK_SECRET not set, skipping signature verification")
+        return True
+        
+    try:
+        # Parse header
+        pairs = dict(pair.split('=') for pair in header.split(','))
+        if 't' not in pairs or 'v1' not in pairs:
+            logger.error("Missing timestamp or signature in header")
+            return False
+            
+        # Get timestamp and signature
+        timestamp = pairs['t']
+        signature = pairs['v1']
+        
+        # Check timestamp
+        timestamp_diff = abs(current_time - int(timestamp))
+        if timestamp_diff > WEBHOOK_TOLERANCE_SECONDS:
+            logger.error(f"Webhook timestamp too old: {timestamp_diff} seconds")
+            return False
+            
+        # Prepare signature payload
+        signature_payload = f"{timestamp}.{payload.decode('utf-8')}"
+        
+        # Compute expected signature
+        computed = hmac.new(
+            WEBHOOK_SECRET.encode(),
+            signature_payload.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Compare signatures
+        return hmac.compare_digest(computed, signature)
+        
+    except Exception as e:
+        logger.error(f"Error verifying webhook signature: {str(e)}", exc_info=True)
+        return False
+
+@app.post("/webhook/transaction")
+async def transaction_webhook(request: Request):
+    """Handle incoming transaction webhooks from Blockfrost"""
+    try:
+        # Get the signature
+        signature = request.headers.get('Blockfrost-Signature')
+        if not signature:
+            raise HTTPException(status_code=400, detail="Missing signature header")
+        
+        # Get the raw payload
+        payload = await request.body()
+        
+        # Verify signature
+        current_time = int(time.time())
+        if not verify_webhook_signature(payload, signature, current_time):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+        
+        # Parse the payload
+        data = await request.json()
+        logger.info(f"Received webhook: {data}")
+        
+        # Validate webhook data
+        if not isinstance(data, dict) or 'type' not in data or data['type'] != 'transaction':
+            logger.error(f"Invalid webhook data: {data}")
+            return {"status": "ignored"}
+            
+        # Get transactions from payload
+        transactions = data.get('payload', [])
+        if not transactions:
+            return {"status": "no transactions"}
+            
+        # Process each transaction
+        for tx_data in transactions:
+            # Get transaction details
+            tx = tx_data.get('tx', {})
+            inputs = tx_data.get('inputs', [])
+            outputs = tx_data.get('outputs', [])
+            
+            # Skip if missing required data
+            if not tx or not inputs or not outputs:
+                continue
+                
+            # Check if any of our tracked tokens are involved
+            trackers = db.get_all_token_trackers()
+            for tracker in trackers:
+                # Check inputs and outputs for our policy ID
+                is_involved = False
+                
+                # Check inputs
+                for inp in inputs:
+                    for amt in inp.get('amount', []):
+                        if amt.get('unit', '').startswith(tracker.policy_id):
+                            is_involved = True
+                            break
+                    if is_involved:
+                        break
+                        
+                # Check outputs if not found in inputs
+                if not is_involved:
+                    for out in outputs:
+                        for amt in out.get('amount', []):
+                            if amt.get('unit', '').startswith(tracker.policy_id):
+                                is_involved = True
+                                break
+                        if is_involved:
+                            break
+                
+                if is_involved:
+                    # Analyze the transaction
+                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(tx_data, tracker.policy_id)
+                    
+                    # Send notification
+                    await send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details)
+        
+        return {"status": "ok"}
+        
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Store active tracking configurations
 active_trackers = {}
 
 class TokenTracker:
-    def __init__(self, policy_id, token_name, image_url, threshold, channel_id, last_block=None, track_transfers=True, trade_notifications=0, transfer_notifications=0):
+    def __init__(self, policy_id: str, channel_id: int, last_block: int = None):
         self.policy_id = policy_id
-        self.token_name = token_name
-        self.image_url = image_url
-        self.threshold = threshold
         self.channel_id = channel_id
         self.last_block = last_block
-        self.track_transfers = track_transfers
-        self.trade_notifications = trade_notifications
-        self.transfer_notifications = transfer_notifications
         
-        # Save to database
-        try:
-            db.save_token_tracker({
-                'policy_id': policy_id,
-                'token_name': token_name,
-                'image_url': image_url,
-                'threshold': threshold,
-                'channel_id': channel_id,
-                'last_block': last_block,
-                'track_transfers': track_transfers,
-                'trade_notifications': trade_notifications,
-                'transfer_notifications': transfer_notifications
-            })
-        except Exception as e:
-            logger.error(f"Failed to save token tracker to database: {str(e)}", exc_info=True)
-        
-        logger.info(f"Created new TokenTracker for {token_name} (policy_id: {policy_id})")
-        
-    def increment_trade_notifications(self):
-        self.trade_notifications += 1
-        db.update_notification_counts(self.policy_id, self.channel_id, self.trade_notifications, self.transfer_notifications)
+    def __str__(self):
+        return f"TokenTracker(policy_id={self.policy_id}, channel_id={self.channel_id}, last_block={self.last_block})"
 
-    def increment_transfer_notifications(self):
-        self.transfer_notifications += 1
-        db.update_notification_counts(self.policy_id, self.channel_id, self.trade_notifications, self.transfer_notifications)
+async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
+    """Send a notification about a transaction to the appropriate Discord channel"""
+    try:
+        channel = bot.get_channel(tracker.channel_id)
+        if not channel:
+            logger.error(f"Could not find channel {tracker.channel_id}")
+            return
+            
+        # Get token info
+        token_info = await get_token_info(tracker.policy_id)
+        token_name = token_info.get('name', 'Unknown Token')
+        
+        # Create embed
+        embed = discord.Embed(
+            title=f"{token_name} Transaction Detected!",
+            color=discord.Color.blue()
+        )
+        
+        # Add transaction details
+        if tx_type == 'dex_trade':
+            embed.add_field(
+                name="Transaction Type",
+                value="DEX Trade",
+                inline=False
+            )
+        elif tx_type == 'wallet_transfer':
+            embed.add_field(
+                name="Transaction Type",
+                value="Wallet Transfer",
+                inline=False
+            )
+        
+        # Add amounts
+        if ada_amount:
+            embed.add_field(
+                name="ADA Amount",
+                value=f"{ada_amount:,.2f} ₳",
+                inline=True
+            )
+        if token_amount:
+            embed.add_field(
+                name="Token Amount",
+                value=f"{token_amount:,}",
+                inline=True
+            )
+            
+        # Add any additional details
+        if details:
+            for key, value in details.items():
+                if key != 'error':  # Don't show error details in Discord
+                    embed.add_field(
+                        name=key.replace('_', ' ').title(),
+                        value=str(value),
+                        inline=False
+                    )
+        
+        # Send the notification
+        await channel.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error sending notification: {str(e)}", exc_info=True)
 
 def get_token_info(api: BlockFrostApi, policy_id: str):
     try:
@@ -158,7 +344,7 @@ def analyze_transaction_improved(tx_details, policy_id):
     """
     try:
         # Get the utxos
-        utxos = tx_details.utxos if hasattr(tx_details, 'utxos') else None
+        utxos = tx_details.get('utxos', {})
         if not utxos:
             logger.warning(f"No UTXOs found in transaction")
             return 'unknown', 0, 0, {}
@@ -173,22 +359,22 @@ def analyze_transaction_improved(tx_details, policy_id):
         has_policy_in_output = False
         
         # Check inputs
-        for utxo in utxos.inputs:
-            if hasattr(utxo, 'amount'):
-                for amount in utxo.amount:
-                    if hasattr(amount, 'unit') and policy_id in amount.unit:
+        for utxo in utxos.get('inputs', []):
+            if 'amount' in utxo:
+                for amount in utxo['amount']:
+                    if 'unit' in amount and policy_id in amount['unit']:
                         has_policy_in_input = True
-                        token_amount += int(amount.quantity)
-                    elif hasattr(amount, 'unit') and amount.unit == 'lovelace':
-                        ada_amount += int(amount.quantity)
+                        token_amount += int(amount['quantity'])
+                    elif 'unit' in amount and amount['unit'] == 'lovelace':
+                        ada_amount += int(amount['quantity'])
 
         # Check outputs
-        for utxo in utxos.outputs:
-            if hasattr(utxo, 'amount'):
-                for amount in utxo.amount:
-                    if hasattr(amount, 'unit') and policy_id in amount.unit:
+        for utxo in utxos.get('outputs', []):
+            if 'amount' in utxo:
+                for amount in utxo['amount']:
+                    if 'unit' in amount and policy_id in amount['unit']:
                         has_policy_in_output = True
-                        token_amount = max(token_amount, int(amount.quantity))
+                        token_amount = max(token_amount, int(amount['quantity']))
 
         # Convert lovelace to ADA
         ada_amount = ada_amount / 1_000_000
@@ -205,10 +391,6 @@ def analyze_transaction_improved(tx_details, policy_id):
         logger.error(f"Error in analyze_transaction_improved: {str(e)}", exc_info=True)
         return 'unknown', 0, 0, {}
 
-def create_pool_pm_link(address):
-    """Creates a pool.pm link for a Cardano address"""
-    return f"[{address[:8]}...{address[-4:]}](https://pool.pm/addresses/{address})"
-
 async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tracker, analysis_details):
     """Creates a detailed embed for DEX trades with transaction information"""
     try:
@@ -224,25 +406,25 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
         main_wallet = None
         if trade_type == "buy":
             for addr in output_addresses:
-                for amount in tx_details.outputs:
-                    if amount.address == addr:
-                        for token in amount.amount:
-                            if token.unit.startswith(policy_id) and int(token.quantity) > 0:
+                for amount in tx_details.get('outputs', []):
+                    if amount.get('address') == addr:
+                        for token in amount.get('amount', []):
+                            if token.get('unit', '').startswith(policy_id) and int(token.get('quantity', 0)) > 0:
                                 main_wallet = addr
                                 break
         else:
             for addr in input_addresses:
-                for amount in tx_details.inputs:
-                    if amount.address == addr:
-                        for token in amount.amount:
-                            if token.unit.startswith(policy_id) and int(token.quantity) > 0:
+                for amount in tx_details.get('inputs', []):
+                    if amount.get('address') == addr:
+                        for token in amount.get('amount', []):
+                            if token.get('unit', '').startswith(policy_id) and int(token.get('quantity', 0)) > 0:
                                 main_wallet = addr
                                 break
         
         embed = discord.Embed(
             title=f"{title_emoji} Token {action_word} Detected",
             description=(
-                f"Transaction Hash: [`{tx_details.hash[:8]}...{tx_details.hash[-8:]}`](https://pool.pm/tx/{tx_details.hash})\n"
+                f"Transaction Hash: [`{tx_details.get('hash', '')[:8]}...{tx_details.get('hash', '')[-8:]}`](https://pool.pm/tx/{tx_details.get('hash', '')})\n"
                 f"Main Wallet: {create_pool_pm_link(main_wallet) if main_wallet else 'Unknown'}"
             ),
             color=discord.Color.green() if trade_type == "buy" else discord.Color.blue()
@@ -252,7 +434,7 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
         overview = (
             "```\n"
             f"Type     : DEX {action_word}\n"
-            f"Block    : {tx_details.block}\n"
+            f"Block    : {tx_details.get('block', '')}\n"
             f"Status   : Confirmed\n"
             f"Addresses: {len(input_addresses) + len(output_addresses)}\n"
             "```"
@@ -356,8 +538,8 @@ async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
         )
 
         # From/To Addresses
-        from_address = tx_details.inputs[0].address
-        to_address = tx_details.outputs[0].address
+        from_address = tx_details.get('inputs', [{}])[0].get('address', '')
+        to_address = tx_details.get('outputs', [{}])[0].get('address', '')
         
         transfer_details = (
             f"**From:** ```{from_address[:20]}...{from_address[-8:]}```\n"
@@ -384,7 +566,7 @@ async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
         # Transaction link
         embed.add_field(
             name="🔍 Transaction Details",
-            value=f"[View on CardanoScan](https://cardanoscan.io/transaction/{tx_details.hash})",
+            value=f"[View on CardanoScan](https://cardanoscan.io/transaction/{tx_details.get('hash', '')})",
             inline=False
         )
 
@@ -392,7 +574,7 @@ async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
         embed.set_thumbnail(url=tracker.image_url)
         embed.timestamp = discord.utils.utcnow()
         embed.set_footer(
-            text=f"Transfer detected at • Block #{tx_details.block_height}",
+            text=f"Transfer detected at • Block #{tx_details.get('block_height', '')}",
             icon_url="https://cardanoscan.io/images/favicon.ico"
         )
 
@@ -832,201 +1014,48 @@ async def stop(interaction: discord.Interaction):
         logger.error(f"Error in stop command: {str(e)}", exc_info=True)
         await interaction.response.send_message("Failed to process stop command. Please try again.", ephemeral=True)
 
-@tasks.loop(seconds=60)
-async def check_transactions():
+def run_webhook_server():
+    """Run the FastAPI webhook server"""
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
+
+async def setup_webhook():
+    """Set up the webhook with Blockfrost"""
     try:
-        if not active_trackers:
+        # Get the app's URL from environment
+        app_url = os.getenv('APP_URL')
+        if not app_url:
+            logger.warning("APP_URL not set, cannot set up webhook")
             return
-
-        api = BlockFrostApi(
-            project_id=os.getenv('BLOCKFROST_API_KEY'),
-            base_url=ApiUrls.mainnet.value
-        )
+            
+        webhook_url = f"{app_url.rstrip('/')}/webhook/transaction"
         
-        # Get latest block
-        latest_block = api.block_latest()
-        if isinstance(latest_block, Exception):
-            raise latest_block
-
-        for policy_id, tracker in active_trackers.items():
-            try:
-                # Get asset info first
-                asset_info = api.assets_policy(policy_id)
-                if isinstance(asset_info, Exception):
-                    raise asset_info
-                if not asset_info:
-                    logger.error(f"Could not find asset info for policy {policy_id}")
-                    continue
-
-                # Get first asset and its hex name
-                first_asset = asset_info[0]
-                # Get the hex asset name from the asset_name field
-                asset_name_hex = first_asset.asset_name if hasattr(first_asset, 'asset_name') else ''
-                full_asset_id = f"{policy_id}{asset_name_hex}"
-                logger.info(f"Checking transactions for asset: {full_asset_id}")
-                
-                # Get transactions since last check with pagination
-                all_transactions = []
-                try:
-                    # Get transactions for current page
-                    transactions = api.asset_transactions(
-                        asset=full_asset_id,
-                        count=20,  # Limit to 20 most recent transactions
-                        page=1,
-                        order='desc'  # Get newest first
-                    )
-                    if isinstance(transactions, Exception):
-                        raise transactions
-                        
-                    # No more transactions
-                    if not transactions:
-                        continue
-                        
-                    logger.info(f"Found {len(transactions)} transactions on page 1")
-                        
-                    # Filter transactions based on block height if we have a last_block
-                    if tracker.last_block:
-                        transactions = [tx for tx in transactions if tx.block_height > tracker.last_block]
-                        
-                    # Add filtered transactions
-                    all_transactions.extend(transactions)
-                    
-                except Exception as tx_e:
-                    if hasattr(tx_e, 'status_code'):
-                        if tx_e.status_code == 404:
-                            logger.warning(f"Asset {full_asset_id} not found. Using policy endpoint...")
-                            # Fallback to getting all assets under the policy
-                            try:
-                                # Get all assets under this policy
-                                policy_assets = api.assets_policy(policy_id)
-                                if isinstance(policy_assets, Exception):
-                                    raise policy_assets
-                                    
-                                all_transactions = []
-                                logger.info(f"Found {len(policy_assets)} assets under policy")
-                                    
-                                # Debug log the first asset's structure
-                                if policy_assets:
-                                    first_asset = policy_assets[0]
-                                    logger.info(f"Asset structure: {vars(first_asset)}")
-                                    
-                                # Get transactions for each asset
-                                for asset in policy_assets:
-                                    try:
-                                        # Get the asset ID - it's already the full ID (policy_id + hex name)
-                                        if not hasattr(asset, 'asset'):
-                                            logger.warning(f"Could not find asset ID in object with attributes: {vars(asset)}")
-                                            continue
-                                            
-                                        asset_id = asset.asset
-                                        logger.info(f"Processing asset: {asset_id}")
-                                        
-                                        # Only get first page of most recent transactions
-                                        asset_txs = api.asset_transactions(
-                                            asset=asset_id,
-                                            count=20,  # Limit to 20 most recent transactions
-                                            page=1,
-                                            order='desc'  # Newest first
-                                        )
-                                        
-                                        if isinstance(asset_txs, Exception):
-                                            raise asset_txs
-                                        if not asset_txs:
-                                            continue
-                                            
-                                        # Filter by block height if needed
-                                        if tracker.last_block:
-                                            asset_txs = [tx for tx in asset_txs if tx.block_height > tracker.last_block]
-                                            
-                                        all_transactions.extend(asset_txs)
-                                        logger.info(f"Found {len(asset_txs)} recent transactions for asset {asset_id}")
-                                        
-                                    except Exception as asset_e:
-                                        logger.error(f"Error getting transactions for asset {asset_id if 'asset_id' in locals() else 'unknown'}: {str(asset_e)}", exc_info=True)
-                                        continue
-                                        
-                                # Remove duplicates by tx_hash
-                                seen = set()
-                                unique_txs = []
-                                for tx in all_transactions:
-                                    if tx.tx_hash not in seen:
-                                        seen.add(tx.tx_hash)
-                                        unique_txs.append(tx)
-                                all_transactions = unique_txs
-                                
-                                logger.info(f"Found total of {len(all_transactions)} unique recent transactions across all policy assets")
-                                
-                            except Exception as policy_e:
-                                logger.error(f"Error getting policy assets: {str(policy_e)}", exc_info=True)
-                                raise policy_e
-                        elif tx_e.status_code == 429:
-                            logger.warning("Rate limit reached, waiting for next cycle")
-                            break
-                        else:
-                            raise tx_e
-                    else:
-                        raise tx_e
-                    break
-
-                logger.info(f"Processing {len(all_transactions)} total transactions for {policy_id}")
-
-                # Process each transaction
-                for tx in all_transactions:
-                    try:
-                        # Get full transaction details
-                        tx_details = api.transaction(tx.tx_hash)
-                        if isinstance(tx_details, Exception):
-                            raise tx_details
-                        if not tx_details:
-                            continue
-
-                        # Analyze the transaction
-                        tx_type, ada_amount, token_amount, details = analyze_transaction_improved(tx_details, policy_id)
-                        
-                        # For trades, check ADA amount
-                        if tx_type == 'dex_trade' and ada_amount >= tracker.threshold:
-                            # Create and send trade notification
-                            embed = await create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tracker, details)
-                            channel = bot.get_channel(tracker.channel_id)
-                            if channel:
-                                await channel.send(embed=embed)
-                                tracker.increment_trade_notifications()
-                                    
-                        # For transfers, check token amount
-                        elif tx_type == 'wallet_transfer' and tracker.track_transfers and token_amount >= tracker.threshold:
-                            # Create and send transfer notification
-                            transfer_embed = await create_transfer_embed(tx_details, policy_id, token_amount, tracker)
-                            channel = bot.get_channel(tracker.channel_id)
-                            if channel:
-                                await channel.send(embed=transfer_embed)
-                                tracker.increment_transfer_notifications()
-                    
-                    except Exception as tx_e:
-                        logger.error(f"Error processing transaction {tx.tx_hash}: {str(tx_e)}", exc_info=True)
-                        continue
-
-                # Update last block height
-                if all_transactions:
-                    max_block = max(tx.block_height for tx in all_transactions)
-                    tracker.last_block = max(max_block, tracker.last_block or 0)
-                    logger.debug(f"Updated last block height for {policy_id}: {tracker.last_block}")
-                    
-                    # Update database with new block height
-                    try:
-                        db.update_last_block(policy_id, tracker.channel_id, tracker.last_block)
-                    except Exception as e:
-                        logger.error(f"Failed to update last block in database: {str(e)}", exc_info=True)
-                
-            except Exception as tracker_e:
-                logger.error(f"Error processing tracker {policy_id}: {str(tracker_e)}", exc_info=True)
-                continue
-                
+        # Get existing webhooks
+        webhooks = api.webhooks()
+        
+        # Check if our webhook already exists
+        exists = any(w.url == webhook_url for w in webhooks)
+        if not exists:
+            # Create new webhook
+            webhook = api.webhook_create(
+                url=webhook_url,
+                enabled=True,
+                policy_id=None,  # We'll filter policies in our code
+                triggers=['tx']
+            )
+            logger.info(f"Created new webhook: {webhook}")
     except Exception as e:
-        logger.error(f"Error in check_transactions: {str(e)}", exc_info=True)
+        logger.error(f"Error setting up webhook: {str(e)}", exc_info=True)
 
 @bot.event
 async def on_ready():
+    """Called when the bot is ready"""
     logger.info(f"Bot is ready: {bot.user}")
+    
+    # Set up webhook
+    await setup_webhook()
+    
+    # Start the webhook server in a separate thread
+    threading.Thread(target=run_webhook_server, daemon=True).start()
     
     # Load trackers from database
     try:
@@ -1051,7 +1080,6 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         logger.info(f"Synced {len(synced)} command(s)")
-        check_transactions.start()
     except Exception as e:
         logger.error(f"Error syncing commands: {str(e)}", exc_info=True)
 
