@@ -318,13 +318,18 @@ class TokenTracker:
 async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
     """Send a notification about a transaction to the appropriate Discord channel"""
     try:
+        # For transfers, check if we should track them
+        if tx_type == 'wallet_transfer' and not tracker.track_transfers:
+            logger.info("Transfer tracking disabled, skipping notification")
+            return
+
         # Get decimals for threshold comparison
         decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
         human_readable_amount = token_amount
         
         # Check if the token amount meets the threshold
         if human_readable_amount < tracker.threshold:
-            logger.info(f"Token amount {human_readable_amount} below threshold {tracker.threshold}, skipping notification")
+            logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}, skipping notification")
             return
             
         # Get the channel
@@ -492,6 +497,7 @@ def analyze_transaction_improved(tx_details, policy_id):
                 if 'unit' in amount and policy_id in amount['unit']:
                     raw_amount = int(amount['quantity'])
                     token_in += raw_amount
+                    logger.debug(f"Found {raw_amount} tokens in input")
                 elif 'unit' in amount and amount['unit'] == 'lovelace':
                     ada_in += int(amount['quantity'])
 
@@ -501,6 +507,7 @@ def analyze_transaction_improved(tx_details, policy_id):
                 if 'unit' in amount and policy_id in amount['unit']:
                     raw_amount = int(amount['quantity'])
                     token_out += raw_amount
+                    logger.debug(f"Found {raw_amount} tokens in output")
                 elif 'unit' in amount and amount['unit'] == 'lovelace':
                     ada_out += int(amount['quantity'])
 
@@ -514,6 +521,7 @@ def analyze_transaction_improved(tx_details, policy_id):
         
         # Convert token amount using decimals
         token_amount = raw_token_amount / (10 ** decimals)
+        logger.debug(f"Raw token amount: {raw_token_amount}, Converted amount: {token_amount}")
 
         # Store details for notification
         details = {
@@ -521,13 +529,19 @@ def analyze_transaction_improved(tx_details, policy_id):
             'ada_out': ada_out,
             'token_in': token_in,
             'token_out': token_out,
-            'decimals': decimals,
-            'raw_token_amount': raw_token_amount
+            'raw_token_amount': raw_token_amount,
+            'decimals': decimals
         }
 
         # Determine transaction type
         has_policy_in_input = token_in > 0
         has_policy_in_output = token_out > 0
+
+        # Log token movement
+        if has_policy_in_input:
+            logger.debug(f"Token input: {token_in}")
+        if has_policy_in_output:
+            logger.debug(f"Token output: {token_out}")
 
         # Determine transaction type
         if has_policy_in_input and has_policy_in_output:
