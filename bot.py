@@ -287,7 +287,8 @@ class TokenTracker:
     def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
                  image_url: str = None, threshold: float = 1000.0, 
                  track_transfers: bool = True, last_block: int = None,
-                 trade_notifications: int = 0, transfer_notifications: int = 0):
+                 trade_notifications: int = 0, transfer_notifications: int = 0,
+                 token_info: dict = None):
         self.policy_id = policy_id
         self.channel_id = channel_id
         self.token_name = token_name
@@ -298,8 +299,8 @@ class TokenTracker:
         self.trade_notifications = trade_notifications
         self.transfer_notifications = transfer_notifications
         
-        # Get token info including decimals
-        self.token_info = get_token_info(policy_id)
+        # Get token info including decimals if not provided
+        self.token_info = token_info or get_token_info(policy_id)
         if self.token_info:
             logger.info(f"Token {token_name} has {self.token_info.get('decimals', 0)} decimals")
         
@@ -431,7 +432,9 @@ def get_token_info(policy_id: str):
             
         # If not found, check asset metadata
         if decimals is None and hasattr(metadata, 'metadata'):
-            decimals = metadata.metadata.get('decimals')
+            # Convert Namespace to dict if needed
+            meta_dict = vars(metadata.metadata) if hasattr(metadata.metadata, '__dict__') else {}
+            decimals = meta_dict.get('decimals')
             
         # Default to 0 if no decimal information found
         if decimals is None:
@@ -880,56 +883,50 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
         self.add_item(self.track_transfers)
 
     async def on_submit(self, interaction: discord.Interaction):
+        """Handle form submission"""
         try:
-            # Create loading message
-            loading_embed = discord.Embed(
-                title="🔍 Initializing Token Tracking",
-                description="Please wait while I set up token tracking...",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=loading_embed)
-            message = await interaction.original_response()
-
-            policy_id = self.policy_id.value.strip()
-            token_name = self.token_name.value.strip()
-            image_url = self.image_url.value.strip() if self.image_url.value else None
-            
-            # Validate and convert threshold
-            try:
-                threshold = float(self.threshold.value or "1000")
-                if threshold <= 0:
-                    raise ValueError("Threshold must be positive")
-            except ValueError:
-                error_embed = discord.Embed(
-                    title="❌ Invalid Threshold",
-                    description="Please enter a valid positive number for the threshold.",
-                    color=discord.Color.red()
+            # Get token info first to validate the policy ID
+            token_info = get_token_info(self.policy_id.value)
+            if not token_info:
+                await interaction.response.send_message(
+                    "❌ Could not find token with that policy ID. Please check the ID and try again.",
+                    ephemeral=True
                 )
-                await message.edit(embed=error_embed)
                 return
-
+                
+            # Parse threshold
+            try:
+                threshold = float(self.threshold.value) if self.threshold.value else 1000.0
+            except ValueError:
+                await interaction.response.send_message(
+                    "❌ Invalid threshold value. Please enter a valid number.",
+                    ephemeral=True
+                )
+                return
+                
             # Parse track_transfers
-            track_transfers = self.track_transfers.value.lower() != "no"
-
-            # Check if already tracking and remove if exists
-            if policy_id in active_trackers:
-                # Remove from memory
-                old_tracker = active_trackers.pop(policy_id)
-                # Remove from database
-                try:
-                    database.delete_token_tracker(policy_id, old_tracker.channel_id)
-                except Exception as e:
-                    logger.error(f"Failed to delete old token tracker from database: {str(e)}", exc_info=True)
-                logger.info(f"Removed existing tracker for {policy_id}")
-
-            # Create new tracker
+            track_transfers = self.track_transfers.value.lower() != 'no'
+            
+            # Create tracker
             tracker = TokenTracker(
-                policy_id=policy_id,
-                token_name=token_name,
-                image_url=image_url,
-                threshold=threshold,
+                policy_id=self.policy_id.value,
                 channel_id=interaction.channel_id,
-                track_transfers=track_transfers
+                token_name=self.token_name.value,
+                image_url=self.image_url.value if self.image_url.value else None,
+                threshold=threshold,
+                track_transfers=track_transfers,
+                token_info=token_info
+            )
+            
+            # Add to database
+            database.add_tracker(
+                policy_id=tracker.policy_id,
+                channel_id=tracker.channel_id,
+                token_name=tracker.token_name,
+                image_url=tracker.image_url,
+                threshold=tracker.threshold,
+                track_transfers=tracker.track_transfers,
+                token_info=tracker.token_info
             )
             
             # Create success embed
@@ -937,8 +934,8 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 title="✅ Token Tracking Started",
                 description=(
                     f"Successfully initialized tracking for:\n"
-                    f"**Token:** {token_name}\n"
-                    f"**Policy ID:** `{policy_id}`"
+                    f"**Token:** {tracker.token_name}\n"
+                    f"**Policy ID:** `{tracker.policy_id}`"
                 ),
                 color=discord.Color.green()
             )
@@ -987,27 +984,15 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             embed.set_footer(text=f"Started tracking at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
             # Create view with buttons
-            view = TokenControls(policy_id)
+            view = TokenControls(tracker.policy_id)
             
             # Update the loading message
-            await message.edit(embed=embed, view=view)
+            await interaction.response.send_message(embed=embed, view=view)
             
             # Save to memory and database
-            active_trackers[policy_id] = tracker
-            try:
-                database.save_token_tracker({
-                    'policy_id': policy_id,
-                    'token_name': token_name,
-                    'image_url': tracker.image_url,
-                    'threshold': threshold,
-                    'channel_id': interaction.channel_id,
-                    'last_block': None,
-                    'track_transfers': track_transfers
-                })
-            except Exception as e:
-                logger.error(f"Failed to save token tracker to database: {str(e)}", exc_info=True)
+            active_trackers[tracker.policy_id] = tracker
             
-            logger.info(f"Started tracking token: {token_name} ({policy_id})")
+            logger.info(f"Started tracking token: {tracker.token_name} ({tracker.policy_id})")
                 
         except Exception as e:
             logger.error(f"Error in token setup: {str(e)}", exc_info=True)
@@ -1016,7 +1001,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 description="Failed to start tracking. Please check your inputs and try again.",
                 color=discord.Color.red()
             )
-            await message.edit(embed=error_embed)
+            await interaction.response.send_message(embed=error_embed)
 
 @bot.tree.command(name="start", description="Start tracking token purchases and transfers")
 async def start(interaction: discord.Interaction):

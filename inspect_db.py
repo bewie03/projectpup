@@ -1,102 +1,120 @@
 import psycopg2
+import os
+import json
+
+def get_db_connection():
+    """Get a connection to the PostgreSQL database"""
+    DATABASE_URL = "postgres://uf96h0a7396t3j:p98406daed2890173604432daf725ecedc22819e058d1019c79681d6c84a65501@cd27da2sn4hj7h.cluster-czrs8kj4isg7.us-east-1.rds.amazonaws.com:5432/dbu70voivfu6u8"
+    return psycopg2.connect(DATABASE_URL)
+
+def create_tables():
+    """Create the database tables if they don't exist"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Create trackers table
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS trackers (
+                policy_id TEXT PRIMARY KEY,
+                channel_id INTEGER,
+                token_name TEXT,
+                image_url TEXT,
+                threshold REAL,
+                track_transfers BOOLEAN,
+                last_block INTEGER,
+                trade_notifications INTEGER,
+                transfer_notifications INTEGER,
+                token_info JSONB
+            )
+        ''')
+        
+        conn.commit()
+        print("Database tables created successfully!")
+        
+    except Exception as e:
+        print(f"Error creating tables: {str(e)}")
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
+
+def migrate_database():
+    """Add token_info column to token_trackers table"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Check if token_info column exists
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'trackers' 
+            AND column_name = 'token_info'
+        """)
+        exists = cur.fetchone()
+        
+        if not exists:
+            print("Adding token_info column to trackers table...")
+            cur.execute('ALTER TABLE trackers ADD COLUMN token_info JSONB')
+            conn.commit()
+            print("Migration successful!")
+        else:
+            print("token_info column already exists")
+            
+    except Exception as e:
+        print(f"Error during migration: {str(e)}")
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
 
 def inspect_database():
-    DATABASE_URL = "postgres://uf96h0a7396t3j:p98406daed2890173604432daf725ecedc22819e058d1019c79681d6c84a65501@cd27da2sn4hj7h.cluster-czrs8kj4isg7.us-east-1.rds.amazonaws.com:5432/dbu70voivfu6u8"
-    conn = psycopg2.connect(DATABASE_URL)
+    """Display all trackers in the database"""
+    conn = get_db_connection()
     cur = conn.cursor()
     
-    # List all tables
-    cur.execute("""
-        SELECT table_name 
-        FROM information_schema.tables 
-        WHERE table_schema = 'public'
-        AND table_name = 'token_trackers'
-    """)
-    tables = cur.fetchall()
-    
-    if not tables:
-        print("No token_trackers table found!")
-        return
-        
-    # Show token_trackers table info
-    print("\n=== token_trackers table ===")
-    
-    # Get column info
-    cur.execute("""
-        SELECT column_name, data_type 
-        FROM information_schema.columns 
-        WHERE table_name = 'token_trackers'
-        ORDER BY ordinal_position
-    """)
-    columns = cur.fetchall()
-    print("\nColumns:")
-    for col in columns:
-        print(f"{col[0]:<20} {col[1]}")
-        
-    # Get row count
-    cur.execute("SELECT COUNT(*) FROM token_trackers")
-    count = cur.fetchone()[0]
-    print(f"\nTotal rows: {count}")
-    
-    # Show sample data
-    if count > 0:
-        cur.execute("SELECT * FROM token_trackers")
-        rows = cur.fetchall()
-        print("\nCurrent data:")
-        for row in rows:
-            print("\nToken tracker:")
-            for i, col in enumerate(columns):
-                print(f"{col[0]:<20} {row[i]}")
-    
-    cur.close()
-    conn.close()
-
-def update_database():
-    DATABASE_URL = "postgres://uf96h0a7396t3j:p98406daed2890173604432daf725ecedc22819e058d1019c79681d6c84a65501@cd27da2sn4hj7h.cluster-czrs8kj4isg7.us-east-1.rds.amazonaws.com:5432/dbu70voivfu6u8"
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-
     try:
-        # Add missing columns if they don't exist
+        # Get column names
         cur.execute("""
-            ALTER TABLE token_trackers
-            ADD COLUMN IF NOT EXISTS image_url TEXT,
-            ADD COLUMN IF NOT EXISTS last_block BIGINT DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS track_transfers BOOLEAN DEFAULT TRUE,
-            ADD COLUMN IF NOT EXISTS trade_notifications INTEGER DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS transfer_notifications INTEGER DEFAULT 0;
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'trackers'
+            ORDER BY ordinal_position
         """)
-
-        # Update any existing rows to have default values
-        cur.execute("""
-            UPDATE token_trackers
-            SET 
-                last_block = COALESCE(last_block, 0),
-                track_transfers = COALESCE(track_transfers, TRUE),
-                trade_notifications = COALESCE(trade_notifications, 0),
-                transfer_notifications = COALESCE(transfer_notifications, 0)
-            WHERE last_block IS NULL 
-               OR track_transfers IS NULL 
-               OR trade_notifications IS NULL 
-               OR transfer_notifications IS NULL;
-        """)
-
-        conn.commit()
-        print("Successfully updated database schema and data")
-
+        columns = [col[0] for col in cur.fetchall()]
+        
+        # Get all trackers
+        cur.execute('SELECT * FROM trackers')
+        rows = cur.fetchall()
+        
+        if not rows:
+            print("No trackers found in database")
+            return
+            
+        print("\nCurrent trackers in database:")
+        print("-" * 80)
+        
+        for row in rows:
+            print("\nTracker:")
+            for i, value in enumerate(row):
+                if columns[i] == 'token_info' and value:
+                    # Pretty print JSON
+                    print(f"{columns[i]}: {json.dumps(value, indent=2)}")
+                else:
+                    print(f"{columns[i]}: {value}")
+            print("-" * 40)
+            
     except Exception as e:
-        conn.rollback()
-        print(f"Error: {str(e)}")
+        print(f"Error inspecting database: {str(e)}")
     finally:
         cur.close()
         conn.close()
 
 if __name__ == "__main__":
-    print("Current database state:")
-    inspect_database()
+    # First create/migrate the database
+    create_tables()
+    migrate_database()
     
-    print("\nUpdating database schema...")
-    update_database()
-    
-    print("\nFinal database state:")
+    # Then show current state
     inspect_database()

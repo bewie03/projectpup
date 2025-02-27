@@ -1,10 +1,11 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, BigInteger, Boolean, DateTime, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, BigInteger, Boolean, DateTime, text, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 import os
 import logging
 from datetime import datetime
+import json
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -16,34 +17,34 @@ class TokenTracker(Base):
     """Model for token tracking configuration"""
     __tablename__ = 'token_trackers'
     
-    id = Column(Integer, primary_key=True)
-    policy_id = Column(String, nullable=False)
-    token_name = Column(String, nullable=False)
+    policy_id = Column(String, primary_key=True)
+    channel_id = Column(BigInteger)
+    token_name = Column(String)
     image_url = Column(String)
-    threshold = Column(Float, default=0.0)
-    channel_id = Column(BigInteger, nullable=False)
-    last_block = Column(Integer, default=0)
+    threshold = Column(Float, default=1000.0)
     track_transfers = Column(Boolean, default=True)
+    last_block = Column(BigInteger, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     trade_notifications = Column(Integer, default=0)
     transfer_notifications = Column(Integer, default=0)
+    token_info = Column(JSON)
     
     def to_dict(self):
         """Convert tracker to dictionary"""
         return {
-            'id': self.id,
             'policy_id': self.policy_id,
+            'channel_id': self.channel_id,
             'token_name': self.token_name,
             'image_url': self.image_url,
             'threshold': self.threshold,
-            'channel_id': self.channel_id,
-            'last_block': self.last_block,
             'track_transfers': self.track_transfers,
+            'last_block': self.last_block,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'trade_notifications': self.trade_notifications,
-            'transfer_notifications': self.transfer_notifications
+            'transfer_notifications': self.transfer_notifications,
+            'token_info': self.token_info
         }
 
 class Database:
@@ -93,7 +94,7 @@ class Database:
         finally:
             session.close()
             
-    def add_tracker(self, policy_id, token_name, channel_id, image_url=None, threshold=0.0):
+    def add_tracker(self, policy_id, token_name, channel_id, image_url=None, threshold=1000.0, token_info=None):
         """Add a new token tracker"""
         session = self.Session()
         try:
@@ -102,7 +103,8 @@ class Database:
                 token_name=token_name,
                 channel_id=channel_id,
                 image_url=image_url,
-                threshold=threshold
+                threshold=threshold,
+                token_info=token_info
             )
             session.add(tracker)
             session.commit()
