@@ -172,6 +172,22 @@ class Database:
             return False
         finally:
             session.close()
+            
+    def get_all_token_trackers(self):
+        """Retrieve all token trackers from the database.
+        
+        Returns:
+            list: A list of all token trackers in the database
+        """
+        try:
+            session = self.Session()
+            trackers = session.query(TokenTracker).all()
+            return trackers
+        except SQLAlchemyError as e:
+            logger.error(f"Error retrieving token trackers: {str(e)}")
+            return []
+        finally:
+            session.close()
 
 # Create database instance
 db = Database()
