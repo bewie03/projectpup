@@ -111,10 +111,10 @@ class TokenTracker:
         self.transfer_notifications += 1
         db.update_notification_counts(self.policy_id, self.channel_id, self.trade_notifications, self.transfer_notifications)
 
-async def get_token_info(api: BlockFrostApi, policy_id: str):
+def get_token_info(api: BlockFrostApi, policy_id: str):
     try:
         # Get all assets under this policy
-        assets = await api.assets_policy(policy_id)
+        assets = api.assets_policy(policy_id)
         if isinstance(assets, Exception):
             raise assets
         return assets[0] if assets else None
@@ -122,7 +122,7 @@ async def get_token_info(api: BlockFrostApi, policy_id: str):
         logger.error(f"Error getting token info: {str(e)}", exc_info=True)
         return None
 
-async def get_transaction_details(api: BlockFrostApi, tx_hash: str):
+def get_transaction_details(api: BlockFrostApi, tx_hash: str):
     try:
         logger.info(f"Fetching transaction details for tx_hash: {tx_hash}")
         # Get detailed transaction information
@@ -151,7 +151,7 @@ async def get_transaction_details(api: BlockFrostApi, tx_hash: str):
         logger.error(f"Unexpected error in get_transaction_details: {str(e)}", exc_info=True)
         return None, None, None
 
-async def analyze_transaction_improved(tx_details, policy_id):
+def analyze_transaction_improved(tx_details, policy_id):
     """
     Enhanced transaction analysis that detects DEX trades by analyzing transaction patterns
     Returns: (type, ada_amount, token_amount, details)
@@ -775,9 +775,6 @@ async def status(interaction: discord.Interaction):
             if tracker.image_url and not embed.thumbnail:
                 embed.set_thumbnail(url=tracker.image_url)
 
-        # Add footer with timestamp
-        embed.set_footer(text=f"Updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
         # Send the embed without any view/buttons
         await interaction.response.send_message(embed=embed)
 
@@ -797,24 +794,27 @@ async def check_transactions():
         )
         
         # Get latest block
-        latest_block = await api.block_latest()
+        latest_block = api.block_latest()
         if isinstance(latest_block, Exception):
             raise latest_block
 
         for policy_id, tracker in active_trackers.items():
             try:
                 # Get asset info first
-                asset_info = await get_token_info(api, policy_id)
+                asset_info = api.assets_policy(policy_id)
+                if isinstance(asset_info, Exception):
+                    raise asset_info
                 if not asset_info:
                     logger.error(f"Could not find asset info for policy {policy_id}")
                     continue
 
-                # Construct full asset ID (policy_id + hex encoded asset name)
-                asset_name_hex = asset_info.asset_name.hex() if hasattr(asset_info, 'asset_name') else ''
+                # Get first asset and its hex name
+                first_asset = asset_info[0]
+                asset_name_hex = first_asset.asset_name.hex() if hasattr(first_asset, 'asset_name') else ''
                 full_asset_id = f"{policy_id}{asset_name_hex}"
                 
                 # Get transactions since last check
-                transactions = await api.asset_transactions(full_asset_id, from_block=tracker.last_block)
+                transactions = api.asset_transactions(full_asset_id, from_block=tracker.last_block)
                 if isinstance(transactions, Exception):
                     raise transactions
                 logger.info(f"Found {len(transactions)} new transactions for {policy_id}")
@@ -823,12 +823,14 @@ async def check_transactions():
                 for tx in transactions:
                     try:
                         # Get full transaction details
-                        tx_details = await get_transaction_details(api, tx.tx_hash)
+                        tx_details = api.transaction(tx.tx_hash)
+                        if isinstance(tx_details, Exception):
+                            raise tx_details
                         if not tx_details:
                             continue
 
                         # Analyze the transaction
-                        tx_type, ada_amount, token_amount, details = await analyze_transaction_improved(tx_details, policy_id)
+                        tx_type, ada_amount, token_amount, details = analyze_transaction_improved(tx_details, policy_id)
                         
                         # For trades, check ADA amount
                         if tx_type == 'dex_trade' and ada_amount >= tracker.threshold:
@@ -852,7 +854,7 @@ async def check_transactions():
                         logger.error(f"Error processing transaction {tx.tx_hash}: {str(tx_e)}", exc_info=True)
                         continue
 
-                # Update last checked block
+                # Update last block height
                 tracker.last_block = latest_block.height
                 logger.debug(f"Updated last block height for {policy_id}: {tracker.last_block}")
                 
