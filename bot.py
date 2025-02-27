@@ -930,41 +930,68 @@ async def check_transactions():
                     except Exception as tx_e:
                         if hasattr(tx_e, 'status_code'):
                             if tx_e.status_code == 404:
-                                logger.warning(f"Asset {full_asset_id} not found. Trying policy transactions...")
-                                # Fallback to policy transactions with pagination
+                                logger.warning(f"Asset {full_asset_id} not found. Using policy endpoint...")
+                                # Fallback to getting all assets under the policy
                                 try:
-                                    policy_txs = []
-                                    page = 1
-                                    while True:
-                                        page_txs = api.assets_policy_txs(
-                                            policy_id=policy_id,
-                                            count=100,
-                                            page=page,
-                                            order='desc'
-                                        )
-                                        if isinstance(page_txs, Exception):
-                                            raise page_txs
-                                        if not page_txs:
-                                            break
-                                            
-                                        logger.info(f"Found {len(page_txs)} policy transactions on page {page}")
+                                    # Get all assets under this policy
+                                    policy_assets = api.assets_policy(policy_id)
+                                    if isinstance(policy_assets, Exception):
+                                        raise policy_assets
                                         
-                                        # Filter by block height if needed
-                                        if tracker.last_block:
-                                            page_txs = [tx for tx in page_txs if tx.block_height > tracker.last_block]
+                                    all_transactions = []
+                                    logger.info(f"Found {len(policy_assets)} assets under policy")
+                                    
+                                    # Get transactions for each asset
+                                    for asset in policy_assets:
+                                        try:
+                                            # Construct full asset ID
+                                            asset_id = f"{policy_id}{asset.asset_name}"
+                                            page = 1
                                             
-                                        policy_txs.extend(page_txs)
-                                        
-                                        # If we got less than 100 transactions, we've hit the end
-                                        if len(page_txs) < 100:
-                                            break
+                                            while True:
+                                                # Get transactions for this asset
+                                                asset_txs = api.asset_transactions(
+                                                    asset=asset_id,
+                                                    count=100,
+                                                    page=page,
+                                                    order='desc'
+                                                )
+                                                
+                                                if isinstance(asset_txs, Exception):
+                                                    raise asset_txs
+                                                if not asset_txs:
+                                                    break
+                                                    
+                                                # Filter by block height if needed
+                                                if tracker.last_block:
+                                                    asset_txs = [tx for tx in asset_txs if tx.block_height > tracker.last_block]
+                                                    
+                                                all_transactions.extend(asset_txs)
+                                                logger.info(f"Found {len(asset_txs)} transactions for asset {asset_id} on page {page}")
+                                                
+                                                # If we got less than 100, we've hit the end
+                                                if len(asset_txs) < 100:
+                                                    break
+                                                    
+                                                page += 1
+                                                
+                                        except Exception as asset_e:
+                                            logger.error(f"Error getting transactions for asset {asset_id}: {str(asset_e)}", exc_info=True)
+                                            continue
                                             
-                                        page += 1
-                                        
-                                    all_transactions = policy_txs
-                                    logger.info(f"Found total of {len(policy_txs)} policy transactions")
+                                    # Remove duplicates by tx_hash
+                                    seen = set()
+                                    unique_txs = []
+                                    for tx in all_transactions:
+                                        if tx.tx_hash not in seen:
+                                            seen.add(tx.tx_hash)
+                                            unique_txs.append(tx)
+                                    all_transactions = unique_txs
+                                    
+                                    logger.info(f"Found total of {len(all_transactions)} unique transactions across all policy assets")
+                                    
                                 except Exception as policy_e:
-                                    logger.error(f"Error getting policy transactions: {str(policy_e)}", exc_info=True)
+                                    logger.error(f"Error getting policy assets: {str(policy_e)}", exc_info=True)
                                     raise policy_e
                             elif tx_e.status_code == 429:
                                 logger.warning("Rate limit reached, waiting for next cycle")
