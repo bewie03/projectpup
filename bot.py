@@ -202,9 +202,16 @@ async def transaction_webhook(request: Request):
                 is_involved = False
                 
                 # Check inputs
+                input_addresses = []
                 for inp in inputs:
+                    input_addresses.append(inp.get('address', ''))
                     for amt in inp.get('amount', []):
-                        if amt.get('unit', '').startswith(tracker.policy_id):
+                        unit = amt.get('unit', '')
+                        # Debug log the unit we're checking
+                        logger.debug(f"Checking input unit: {unit}")
+                        
+                        # Compare with full asset name or policy ID
+                        if unit == full_asset_name or unit.startswith(tracker.policy_id):
                             is_involved = True
                             logger.info(f"Found token {tracker.token_name} in transaction inputs")
                             break
@@ -213,9 +220,16 @@ async def transaction_webhook(request: Request):
                         
                 # Check outputs if not found in inputs
                 if not is_involved:
+                    output_addresses = []
                     for out in outputs:
+                        output_addresses.append(out.get('address', ''))
                         for amt in out.get('amount', []):
-                            if amt.get('unit', '').startswith(tracker.policy_id):
+                            unit = amt.get('unit', '')
+                            # Debug log the unit we're checking
+                            logger.debug(f"Checking output unit: {unit}")
+                            
+                            # Compare with full asset name or policy ID
+                            if unit == full_asset_name or unit.startswith(tracker.policy_id):
                                 is_involved = True
                                 logger.info(f"Found token {tracker.token_name} in transaction outputs")
                                 break
@@ -537,14 +551,16 @@ def analyze_transaction_improved(tx_details, policy_id):
             logger.info(f"Looking for full asset name: {full_asset_name}")
 
         # Check inputs
+        input_addresses = []
         for inp in inputs:
+            input_addresses.append(inp.get('address', ''))
             for amount in inp.get('amount', []):
                 unit = amount.get('unit', '')
                 # Debug log the unit we're checking
                 logger.debug(f"Checking input unit: {unit}")
                 
                 # Compare with full asset name or policy ID
-                if unit == full_asset_name or (not full_asset_name and policy_id in unit):
+                if unit == full_asset_name or unit.startswith(policy_id):
                     raw_amount = int(amount['quantity'])
                     token_in += raw_amount
                     logger.info(f"Found {raw_amount} tokens in input with unit {unit}")
@@ -552,14 +568,16 @@ def analyze_transaction_improved(tx_details, policy_id):
                     ada_in += int(amount['quantity'])
 
         # Check outputs
+        output_addresses = []
         for out in outputs:
+            output_addresses.append(out.get('address', ''))
             for amount in out.get('amount', []):
                 unit = amount.get('unit', '')
                 # Debug log the unit we're checking
                 logger.debug(f"Checking output unit: {unit}")
                 
                 # Compare with full asset name or policy ID
-                if unit == full_asset_name or (not full_asset_name and policy_id in unit):
+                if unit == full_asset_name or unit.startswith(policy_id):
                     raw_amount = int(amount['quantity'])
                     token_out += raw_amount
                     logger.info(f"Found {raw_amount} tokens in output with unit {unit}")
