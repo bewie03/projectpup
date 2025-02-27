@@ -91,24 +91,42 @@ class Database:
             session.close()
             
     def add_tracker(self, policy_id, token_name, channel_id, image_url=None, threshold=1000.0, token_info=None, track_transfers=True):
-        """Add a new token tracker"""
+        """Add a new token tracker or update if exists"""
         session = self.Session()
         try:
-            tracker = TokenTracker(
+            # Check if tracker exists
+            tracker = session.query(TokenTracker).filter_by(
                 policy_id=policy_id,
-                token_name=token_name,
-                channel_id=channel_id,
-                image_url=image_url,
-                threshold=threshold,
-                token_info=token_info,
-                track_transfers=track_transfers
-            )
-            session.add(tracker)
+                channel_id=channel_id
+            ).first()
+            
+            if tracker:
+                # Update existing tracker
+                tracker.token_name = token_name
+                tracker.image_url = image_url
+                tracker.threshold = threshold
+                tracker.token_info = token_info
+                tracker.track_transfers = track_transfers
+                logger.info(f"Updated existing tracker for {token_name}")
+            else:
+                # Create new tracker
+                tracker = TokenTracker(
+                    policy_id=policy_id,
+                    token_name=token_name,
+                    channel_id=channel_id,
+                    image_url=image_url,
+                    threshold=threshold,
+                    token_info=token_info,
+                    track_transfers=track_transfers
+                )
+                session.add(tracker)
+                logger.info(f"Created new tracker for {token_name}")
+                
             session.commit()
             return tracker
         except SQLAlchemyError as e:
             session.rollback()
-            logger.error(f"Database error while adding token tracker: {str(e)}", exc_info=True)
+            logger.error(f"Database error while adding/updating token tracker: {str(e)}", exc_info=True)
             return None
         finally:
             session.close()
