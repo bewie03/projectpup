@@ -60,6 +60,10 @@ class Database:
             
         # Create engine and session
         self.engine = create_engine(self.database_url)
+        
+        # Create tables
+        Base.metadata.create_all(self.engine)
+        
         self.Session = sessionmaker(bind=self.engine)
         
     def get_trackers(self):
@@ -190,4 +194,7 @@ class Database:
             session.close()
 
 # Create database instance
-db = Database()
+database = Database()
+
+# Export the database instance
+__all__ = ['database', 'TokenTracker', 'Database']

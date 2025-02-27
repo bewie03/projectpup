@@ -10,7 +10,8 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
-import database as db
+from database import database
+import logging
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import hmac
@@ -186,7 +187,7 @@ async def transaction_webhook(request: Request):
                 continue
                 
             # Check if any of our tracked tokens are involved
-            trackers = db.get_trackers()
+            trackers = database.get_trackers()
             for tracker in trackers:
                 # Check inputs and outputs for our policy ID
                 is_involved = False
@@ -237,7 +238,7 @@ async def on_ready():
     
     # Load trackers from database
     try:
-        saved_trackers = db.get_trackers()  # Using the correct function name
+        saved_trackers = database.get_trackers()  # Using the correct function name
         for tracker in saved_trackers:
             active_trackers[tracker.policy_id] = tracker
             logger.info(f"Loaded tracker for policy {tracker.policy_id}")
@@ -629,7 +630,7 @@ class TokenControls(discord.ui.View):
             if self.policy_id in active_trackers:
                 # Remove from database
                 try:
-                    db.delete_token_tracker(self.policy_id, interaction.channel_id)
+                    database.delete_token_tracker(self.policy_id, interaction.channel_id)
                 except Exception as e:
                     logger.error(f"Failed to delete token tracker from database: {str(e)}", exc_info=True)
                 
@@ -659,7 +660,7 @@ class TokenControls(discord.ui.View):
                 
                 # Update database
                 try:
-                    db.save_token_tracker({
+                    database.save_token_tracker({
                         'policy_id': self.policy_id,
                         'token_name': tracker.token_name,
                         'image_url': tracker.image_url,
@@ -761,7 +762,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 old_tracker = active_trackers.pop(policy_id)
                 # Remove from database
                 try:
-                    db.delete_token_tracker(policy_id, old_tracker.channel_id)
+                    database.delete_token_tracker(policy_id, old_tracker.channel_id)
                 except Exception as e:
                     logger.error(f"Failed to delete old token tracker from database: {str(e)}", exc_info=True)
                 logger.info(f"Removed existing tracker for {policy_id}")
@@ -839,7 +840,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             # Save to memory and database
             active_trackers[policy_id] = tracker
             try:
-                db.save_token_tracker({
+                database.save_token_tracker({
                     'policy_id': policy_id,
                     'token_name': token_name,
                     'image_url': tracker.image_url,
@@ -993,7 +994,7 @@ async def stop(interaction: discord.Interaction):
                 """Stop tracking the token"""
                 try:
                     # Remove from database
-                    db.remove_all_trackers_for_channel(interaction.channel_id)
+                    database.remove_all_trackers_for_channel(interaction.channel_id)
 
                     # Remove from active trackers
                     policies_to_remove = []
