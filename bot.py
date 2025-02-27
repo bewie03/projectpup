@@ -85,19 +85,35 @@ class TokenTracker:
 async def get_token_info(api: BlockFrostApi, policy_id: str):
     try:
         logger.info(f"Fetching token info for policy_id: {policy_id}")
-        # Get all assets under the policy
-        assets = await api.assets_policy(policy_id=policy_id)
+        
+        # Get assets for the policy ID (this returns a list directly, no need to await)
+        assets = api.assets_policy(policy_id=policy_id)
+        
         if not assets:
             logger.warning(f"No assets found for policy_id: {policy_id}")
             return None
+            
+        # Get the first asset's details
+        asset = assets[0]
+        asset_id = f"{policy_id}{asset.asset_name.hex() if asset.asset_name else ''}"
         
-        logger.info(f"Found {len(assets)} assets for policy_id: {policy_id}")
-        # Get detailed info for the first asset (main token)
-        asset_info = await api.asset(assets[0].asset)
-        return asset_info
-    except ApiError as e:
-        logger.error(f"Blockfrost API error while fetching token info: {str(e)}")
-        return None
+        # This needs to be awaited as it's an async call
+        asset_details = await api.asset(asset_id)
+        
+        if not asset_details:
+            logger.warning(f"No details found for asset: {asset_id}")
+            return None
+            
+        token_info = {
+            'asset_id': asset_id,
+            'name': asset_details.onchain_metadata.get('name', 'Unknown Token') if asset_details.onchain_metadata else 'Unknown Token',
+            'description': asset_details.onchain_metadata.get('description', '') if asset_details.onchain_metadata else '',
+            'image': asset_details.onchain_metadata.get('image', '') if asset_details.onchain_metadata else ''
+        }
+        
+        logger.info(f"Successfully fetched token info: {token_info}")
+        return token_info
+        
     except Exception as e:
         logger.error(f"Unexpected error in get_token_info: {str(e)}", exc_info=True)
         return None
