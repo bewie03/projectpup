@@ -260,25 +260,41 @@ def run_webhook_server():
 @bot.event
 async def on_ready():
     """Called when the bot is ready"""
-    logger.info(f"Bot is ready: {bot.user}")
-    
-    # Start the webhook server in a separate thread
-    threading.Thread(target=run_webhook_server, daemon=True).start()
-    
-    # Load trackers from database
     try:
-        saved_trackers = database.get_trackers()  # Using the correct function name
-        for tracker in saved_trackers:
-            active_trackers[tracker.policy_id] = tracker
-            logger.info(f"Loaded tracker for policy {tracker.policy_id}")
+        # Load all trackers from database
+        trackers = database.get_trackers()
+        logger.info(f"Loading {len(trackers)} trackers from database")
+        
+        for tracker in trackers:
+            try:
+                # Convert database model to TokenTracker object
+                active_trackers[tracker.policy_id] = TokenTracker(
+                    policy_id=tracker.policy_id,
+                    channel_id=int(tracker.channel_id),  # Ensure it's an int
+                    token_name=tracker.token_name,
+                    image_url=tracker.image_url,
+                    threshold=tracker.threshold,
+                    track_transfers=tracker.track_transfers,
+                    last_block=tracker.last_block,
+                    trade_notifications=tracker.trade_notifications,
+                    transfer_notifications=tracker.transfer_notifications,
+                    token_info=tracker.token_info
+                )
+                logger.info(f"Loaded tracker for {tracker.token_name} in channel {tracker.channel_id}")
+            except Exception as e:
+                logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
+                
+        # Sync slash commands
+        await bot.tree.sync()
+        logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
+        
+        # Log guild information
+        for guild in bot.guilds:
+            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
+            logger.info(f"Available channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
+            
     except Exception as e:
-        logger.error(f"Failed to load trackers from database: {str(e)}", exc_info=True)
-
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logger.error(f"Error syncing commands: {str(e)}", exc_info=True)
+        logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
 
 # Store active tracking configurations
 active_trackers = {}
@@ -557,28 +573,17 @@ def analyze_transaction_improved(tx_details, policy_id):
         # Calculate net amounts
         ada_amount = abs(ada_out - ada_in)
         
-        # For wallet transfers, use the output amount (total tokens being moved)
-        # For buys/sells, use the difference between in and out
-        has_policy_in_input = token_in > 0
-        has_policy_in_output = token_out > 0
-        
-        if has_policy_in_input and has_policy_in_output:
-            # Wallet transfer - use the output amount
-            raw_token_amount = token_out
-        else:
-            # Buy/Sell - use the difference
-            raw_token_amount = abs(token_out - token_in)
+        # Always use the absolute difference between in and out amounts
+        raw_token_amount = abs(token_out - token_in)
         
         # Only apply decimal conversion if decimals > 0
         # For tokens with 0 decimals, use the raw amount
         token_amount = raw_token_amount / (10 ** decimals) if decimals > 0 else raw_token_amount
         logger.info(f"Raw token amount: {raw_token_amount}, Decimals: {decimals}, Converted amount: {token_amount}")
 
-        # Log token movement
-        if token_in > 0:
-            logger.info(f"Token input: {token_in}")
-        if token_out > 0:
-            logger.info(f"Token output: {token_out}")
+        # Log token movement for debugging
+        logger.info(f"Token input: {token_in}, Token output: {token_out}")
+        logger.info(f"ADA input: {ada_in}, ADA output: {ada_out}")
 
         # Store details for notification
         details = {
@@ -592,11 +597,11 @@ def analyze_transaction_improved(tx_details, policy_id):
         }
 
         # Determine transaction type
-        if has_policy_in_input and has_policy_in_output:
+        if token_in > 0 and token_out > 0:
             return 'wallet_transfer', ada_amount, token_amount, details
-        elif has_policy_in_input and not has_policy_in_output:
+        elif token_in > 0 and token_out == 0:
             return 'sell', ada_amount, token_amount, details
-        elif not has_policy_in_input and has_policy_in_output:
+        elif token_in == 0 and token_out > 0:
             return 'buy', ada_amount, token_amount, details
         else:
             return 'unknown', 0, 0, details
