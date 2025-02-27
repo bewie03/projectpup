@@ -25,46 +25,37 @@ load_dotenv()
 
 # Configure logging
 def setup_logging():
-    # Create logs directory if it doesn't exist
-    if not os.path.exists('logs'):
-        os.makedirs('logs')
-
+    """Configure logging for both local development and Heroku"""
     # Configure logging format
     log_format = logging.Formatter(
         '%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # File handler for all logs
-    file_handler = RotatingFileHandler(
-        'logs/bot.log',
-        maxBytes=10000000,  # 10MB
-        backupCount=5
-    )
-    file_handler.setFormatter(log_format)
+    # Console handlers for stdout and stderr
+    info_handler = logging.StreamHandler(sys.stdout)
+    info_handler.setFormatter(log_format)
+    info_handler.setLevel(logging.INFO)
+    info_handler.addFilter(lambda record: record.levelno <= logging.INFO)
 
-    # File handler for errors only
-    error_handler = RotatingFileHandler(
-        'logs/error.log',
-        maxBytes=10000000,  # 10MB
-        backupCount=5
-    )
+    error_handler = logging.StreamHandler(sys.stderr)
     error_handler.setFormatter(log_format)
-    error_handler.setLevel(logging.ERROR)
-
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(log_format)
+    error_handler.setLevel(logging.WARNING)
 
     # Get the logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    # Add handlers
-    logger.addHandler(file_handler)
-    logger.addHandler(error_handler)
-    logger.addHandler(console_handler)
+    # Remove any existing handlers
+    logger.handlers = []
 
+    # Add handlers
+    logger.addHandler(info_handler)
+    logger.addHandler(error_handler)
+
+    # Log startup message
+    logger.info("Bot logging initialized")
+    
     return logger
 
 # Initialize logging
@@ -148,34 +139,41 @@ def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> 
 async def transaction_webhook(request: Request):
     """Handle incoming transaction webhooks from Blockfrost"""
     try:
+        # Log webhook received
+        logger.info("Received webhook request")
+        
         # Get the signature
         signature = request.headers.get('Blockfrost-Signature')
         if not signature:
+            logger.error("Missing Blockfrost-Signature header")
             raise HTTPException(status_code=400, detail="Missing signature header")
         
         # Get the raw payload
         payload = await request.body()
+        logger.debug(f"Raw payload size: {len(payload)} bytes")
         
         # Verify signature
         current_time = int(time.time())
         if not verify_webhook_signature(payload, signature, current_time):
+            logger.error("Invalid webhook signature")
             raise HTTPException(status_code=401, detail="Invalid signature")
         
         # Parse the payload
         data = await request.json()
         
-        # Log only essential webhook info
+        # Log webhook info
         tx_count = len(data.get('payload', []))
-        logger.info(f"Received webhook with {tx_count} transaction(s)")
+        logger.info(f"Webhook contains {tx_count} transaction(s)")
         
         # Validate webhook data
         if not isinstance(data, dict) or 'type' not in data or data['type'] != 'transaction':
-            logger.error("Invalid webhook data format")
+            logger.error(f"Invalid webhook data format: {data.get('type', 'unknown type')}")
             return {"status": "ignored"}
             
         # Get transactions from payload
         transactions = data.get('payload', [])
         if not transactions:
+            logger.info("Webhook contains no transactions")
             return {"status": "no transactions"}
             
         # Process each transaction
@@ -184,19 +182,21 @@ async def transaction_webhook(request: Request):
             tx = tx_data.get('tx', {})
             tx_hash = tx.get('hash', 'unknown')
             
-            # Log concise transaction info
-            logger.info(f"Processing transaction: {tx_hash[:8]}...{tx_hash[-8:]}")
+            # Log transaction processing
+            logger.info(f"Processing transaction: {tx_hash}")
             
             inputs = tx_data.get('inputs', [])
             outputs = tx_data.get('outputs', [])
             
             # Skip if missing required data
             if not tx or not inputs or not outputs:
-                logger.warning(f"Skipping transaction {tx_hash[:8]}... - Missing required data")
+                logger.warning(f"Skipping transaction {tx_hash} - Missing required data")
                 continue
                 
             # Check if any of our tracked tokens are involved
             trackers = database.get_trackers()
+            logger.info(f"Checking {len(trackers)} tracked tokens")
+            
             for tracker in trackers:
                 # Check inputs and outputs for our policy ID
                 is_involved = False
@@ -206,6 +206,7 @@ async def transaction_webhook(request: Request):
                     for amt in inp.get('amount', []):
                         if amt.get('unit', '').startswith(tracker.policy_id):
                             is_involved = True
+                            logger.info(f"Found token {tracker.token_name} in transaction inputs")
                             break
                     if is_involved:
                         break
@@ -216,22 +217,25 @@ async def transaction_webhook(request: Request):
                         for amt in out.get('amount', []):
                             if amt.get('unit', '').startswith(tracker.policy_id):
                                 is_involved = True
+                                logger.info(f"Found token {tracker.token_name} in transaction outputs")
                                 break
                         if is_involved:
                             break
                 
                 if is_involved:
                     # Log token involvement
-                    logger.info(f"Found tracked token {tracker.token_name} ({tracker.policy_id[:8]}...) in transaction")
+                    logger.info(f"Analyzing transaction for {tracker.token_name} ({tracker.policy_id})")
                     
                     # Analyze the transaction
                     tx_type, ada_amount, token_amount, details = analyze_transaction_improved(tx_data, tracker.policy_id)
                     
                     # Log analysis results
-                    logger.info(f"Analysis: {tx_type}, ADA: {ada_amount:.2f}, Tokens: {token_amount:,}")
+                    logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:,}")
                     
                     # Send notification
                     await send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details)
+                else:
+                    logger.debug(f"Token {tracker.token_name} not involved in transaction {tx_hash}")
         
         return {"status": "ok"}
         
@@ -298,6 +302,16 @@ class TokenTracker:
 async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
     """Send a notification about a transaction to the appropriate Discord channel"""
     try:
+        # Check if the token amount meets the threshold
+        if token_amount < tracker.threshold:
+            logger.info(f"Token amount {token_amount} below threshold {tracker.threshold}, skipping notification")
+            return
+            
+        # For transfers, check if we should track them
+        if tx_type == 'wallet_transfer' and not tracker.track_transfers:
+            logger.info("Transfer tracking disabled, skipping notification")
+            return
+
         channel = bot.get_channel(tracker.channel_id)
         if not channel:
             logger.error(f"Could not find channel {tracker.channel_id}")
@@ -420,42 +434,56 @@ def analyze_transaction_improved(tx_details, policy_id):
             return 'unknown', 0, 0, {}
 
         # Initialize amounts
-        ada_amount = 0
-        token_amount = 0
+        ada_in = 0
+        ada_out = 0
+        token_in = 0
+        token_out = 0
         details = {}
 
-        # Check inputs and outputs for the policy ID
-        has_policy_in_input = False
-        has_policy_in_output = False
-        
         # Check inputs
         for utxo in utxos.get('inputs', []):
             if 'amount' in utxo:
                 for amount in utxo['amount']:
                     if 'unit' in amount and policy_id in amount['unit']:
-                        has_policy_in_input = True
-                        token_amount += int(amount['quantity'])
+                        token_in += int(amount['quantity'])
                     elif 'unit' in amount and amount['unit'] == 'lovelace':
-                        ada_amount += int(amount['quantity'])
+                        ada_in += int(amount['quantity'])
 
         # Check outputs
         for utxo in utxos.get('outputs', []):
             if 'amount' in utxo:
                 for amount in utxo['amount']:
                     if 'unit' in amount and policy_id in amount['unit']:
-                        has_policy_in_output = True
-                        token_amount = max(token_amount, int(amount['quantity']))
+                        token_out += int(amount['quantity'])
+                    elif 'unit' in amount and amount['unit'] == 'lovelace':
+                        ada_out += int(amount['quantity'])
 
         # Convert lovelace to ADA
-        ada_amount = ada_amount / 1_000_000
+        ada_in = ada_in / 1_000_000
+        ada_out = ada_out / 1_000_000
+        
+        # Calculate net amounts
+        net_ada = ada_out - ada_in
+        net_tokens = token_out - token_in
 
         # Determine transaction type
-        if has_policy_in_input and has_policy_in_output:
-            return 'wallet_transfer', ada_amount, token_amount, details
-        elif has_policy_in_input or has_policy_in_output:
-            return 'dex_trade', ada_amount, token_amount, details
-        else:
-            return 'unknown', ada_amount, token_amount, details
+        MIN_ADA_FOR_TRADE = 3  # Minimum ADA difference to consider it a trade
+        
+        if abs(net_tokens) < 100:  # Very small token movement, probably just fees
+            return 'unknown', abs(net_ada), abs(net_tokens), details
+            
+        if token_in > 0 and token_out > 0:
+            if abs(token_in - token_out) < token_in * 0.01:  # Less than 1% difference
+                return 'wallet_transfer', abs(net_ada), max(token_in, token_out), details
+                
+        # If significant ADA movement, it's likely a trade
+        if abs(net_ada) > MIN_ADA_FOR_TRADE:
+            details['direction'] = 'buy' if net_tokens > 0 else 'sell'
+            details['price_per_token'] = abs(net_ada / net_tokens) if net_tokens != 0 else 0
+            return 'dex_trade', abs(net_ada), abs(net_tokens), details
+            
+        # If we see tokens but minimal ADA, it's probably a transfer
+        return 'wallet_transfer', abs(net_ada), max(token_in, token_out), details
 
     except Exception as e:
         logger.error(f"Error in analyze_transaction_improved: {str(e)}", exc_info=True)
@@ -852,8 +880,8 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 value=(
                     "• DEX Trades (Buys/Sells)\n"
                     "• Wallet Transfers\n"
-                    "• Price per Token\n"
-                    "• Transaction Details"
+                    "• Real-time Notifications\n"
+                    "• Customizable Thresholds"
                 ),
                 inline=True
             )
