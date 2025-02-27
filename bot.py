@@ -298,6 +298,11 @@ class TokenTracker:
         self.trade_notifications = trade_notifications
         self.transfer_notifications = transfer_notifications
         
+        # Get token info including decimals
+        self.token_info = get_token_info(policy_id)
+        if self.token_info:
+            logger.info(f"Token {token_name} has {self.token_info.get('decimals', 0)} decimals")
+        
     def __str__(self):
         return f"TokenTracker(policy_id={self.policy_id}, token_name={self.token_name}, channel_id={self.channel_id})"
 
@@ -312,9 +317,13 @@ class TokenTracker:
 async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
     """Send a notification about a transaction to the appropriate Discord channel"""
     try:
+        # Get decimals for threshold comparison
+        decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
+        human_readable_amount = token_amount / (10 ** decimals)
+        
         # Check if the token amount meets the threshold
-        if token_amount < tracker.threshold:
-            logger.info(f"Token amount {token_amount} below threshold {tracker.threshold}, skipping notification")
+        if human_readable_amount < tracker.threshold:
+            logger.info(f"Token amount {human_readable_amount} below threshold {tracker.threshold}, skipping notification")
             return
             
         # For transfers, check if we should track them
@@ -365,7 +374,7 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         if token_amount:
             embed.add_field(
                 name="Token Amount",
-                value=f"{token_amount:,}",
+                value=format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0)),
                 inline=True
             )
             
@@ -391,16 +400,73 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
     except Exception as e:
         logger.error(f"Error sending notification: {str(e)}", exc_info=True)
 
-def get_token_info(api: BlockFrostApi, policy_id: str):
+def get_token_info(policy_id: str):
+    """Get token information including metadata and decimals"""
     try:
         # Get all assets under this policy
         assets = api.assets_policy(policy_id)
         if isinstance(assets, Exception):
             raise assets
-        return assets[0] if assets else None
+            
+        if not assets:
+            return None
+            
+        # Get the first asset (main token)
+        asset = assets[0]
+        
+        # Get detailed metadata for the asset
+        metadata = api.asset(asset.asset)
+        if isinstance(metadata, Exception):
+            raise metadata
+            
+        # Get onchain metadata if available
+        onchain_metadata = metadata.onchain_metadata if hasattr(metadata, 'onchain_metadata') else {}
+        
+        # Try to get decimals from various sources
+        decimals = None
+        
+        # Check onchain metadata first (CIP-67 standard)
+        if onchain_metadata and isinstance(onchain_metadata, dict):
+            decimals = onchain_metadata.get('decimals')
+            
+        # If not found, check asset metadata
+        if decimals is None and hasattr(metadata, 'metadata'):
+            decimals = metadata.metadata.get('decimals')
+            
+        # Default to 0 if no decimal information found
+        if decimals is None:
+            decimals = 0
+            logger.info(f"No decimal information found for {asset.asset}, defaulting to 0")
+        else:
+            logger.info(f"Found {decimals} decimals for {asset.asset}")
+            
+        return {
+            'asset': asset.asset,
+            'policy_id': policy_id,
+            'name': metadata.asset_name,
+            'decimals': int(decimals),
+            'metadata': onchain_metadata
+        }
+        
     except Exception as e:
         logger.error(f"Error getting token info: {str(e)}", exc_info=True)
         return None
+
+def format_token_amount(amount: int, decimals: int) -> str:
+    """Format token amount considering decimals"""
+    if decimals == 0:
+        return f"{amount:,}"
+    
+    # Convert to float and divide by 10^decimals
+    formatted = amount / (10 ** decimals)
+    
+    # Format with appropriate decimal places
+    if decimals <= 2:
+        return f"{formatted:,.{decimals}f}"
+    elif formatted >= 1000:
+        return f"{formatted:,.2f}"
+    else:
+        return f"{formatted:,.{min(decimals, 6)}f}"
 
 def get_transaction_details(api: BlockFrostApi, tx_hash: str):
     try:
@@ -450,12 +516,17 @@ def analyze_transaction_improved(tx_details, policy_id):
         token_in = 0
         token_out = 0
         details = {}
+        
+        # Get token info for decimal handling
+        token_info = get_token_info(policy_id)
+        decimals = token_info.get('decimals', 0) if token_info else 0
 
         # Check inputs
         for inp in inputs:
             for amount in inp.get('amount', []):
                 if 'unit' in amount and policy_id in amount['unit']:
-                    token_in += int(amount['quantity'])
+                    raw_amount = int(amount['quantity'])
+                    token_in += raw_amount
                 elif 'unit' in amount and amount['unit'] == 'lovelace':
                     ada_in += int(amount['quantity'])
 
@@ -463,7 +534,8 @@ def analyze_transaction_improved(tx_details, policy_id):
         for out in outputs:
             for amount in out.get('amount', []):
                 if 'unit' in amount and policy_id in amount['unit']:
-                    token_out += int(amount['quantity'])
+                    raw_amount = int(amount['quantity'])
+                    token_out += raw_amount
                 elif 'unit' in amount and amount['unit'] == 'lovelace':
                     ada_out += int(amount['quantity'])
 
@@ -475,17 +547,18 @@ def analyze_transaction_improved(tx_details, policy_id):
         ada_amount = abs(ada_out - ada_in)
         token_amount = abs(token_out - token_in)
 
-        # Determine transaction type
-        has_policy_in_input = token_in > 0
-        has_policy_in_output = token_out > 0
-
         # Store details for notification
         details = {
             'ada_in': ada_in,
             'ada_out': ada_out,
             'token_in': token_in,
-            'token_out': token_out
+            'token_out': token_out,
+            'decimals': decimals
         }
+
+        # Determine transaction type
+        has_policy_in_input = token_in > 0
+        has_policy_in_output = token_out > 0
 
         # Determine transaction type
         if has_policy_in_input and has_policy_in_output:
@@ -560,14 +633,14 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
             trade_info = (
                 "```\n"
                 f"ADA Spent  : {ada_amount:,.2f}\n"
-                f"Tokens Recv: {token_amount:,}\n"
+                f"Tokens Recv: {format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}\n"
                 f"Price/Token: {(ada_amount/token_amount):.6f}\n"
                 "```"
             )
         else:
             trade_info = (
                 "```\n"
-                f"Tokens Sold: {token_amount:,}\n"
+                f"Tokens Sold: {format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}\n"
                 f"ADA Recv   : {ada_amount:,.2f}\n"
                 f"Price/Token: {(ada_amount/token_amount):.6f}\n"
                 "```"
@@ -654,7 +727,7 @@ async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
         transfer_details = (
             f"**From:** ```{from_address[:20]}...{from_address[-8:]}```\n"
             f"**To:** ```{to_address[:20]}...{to_address[-8:]}```\n"
-            f"**Amount:** ```{token_amount:,} Tokens```"
+            f"**Amount:** ```{format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))} Tokens```"
         )
         embed.add_field(
             name="🔄 Transfer Details",
