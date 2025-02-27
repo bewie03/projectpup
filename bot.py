@@ -210,8 +210,8 @@ async def transaction_webhook(request: Request):
                         # Debug log the unit we're checking
                         logger.debug(f"Checking input unit: {unit}")
                         
-                        # Compare with full asset name or policy ID
-                        if unit == full_asset_name or unit.startswith(tracker.policy_id):
+                        # Only check policy ID in webhook handler
+                        if unit.startswith(tracker.policy_id):
                             is_involved = True
                             logger.info(f"Found token {tracker.token_name} in transaction inputs")
                             break
@@ -228,8 +228,8 @@ async def transaction_webhook(request: Request):
                             # Debug log the unit we're checking
                             logger.debug(f"Checking output unit: {unit}")
                             
-                            # Compare with full asset name or policy ID
-                            if unit == full_asset_name or unit.startswith(tracker.policy_id):
+                            # Only check policy ID in webhook handler
+                            if unit.startswith(tracker.policy_id):
                                 is_involved = True
                                 logger.info(f"Found token {tracker.token_name} in transaction outputs")
                                 break
