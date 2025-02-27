@@ -90,7 +90,7 @@ class Database:
         finally:
             session.close()
             
-    def add_tracker(self, policy_id, token_name, channel_id, image_url=None, threshold=1000.0, token_info=None):
+    def add_tracker(self, policy_id, token_name, channel_id, image_url=None, threshold=1000.0, token_info=None, track_transfers=True):
         """Add a new token tracker"""
         session = self.Session()
         try:
@@ -100,7 +100,8 @@ class Database:
                 channel_id=channel_id,
                 image_url=image_url,
                 threshold=threshold,
-                token_info=token_info
+                token_info=token_info,
+                track_transfers=track_transfers
             )
             session.add(tracker)
             session.commit()
