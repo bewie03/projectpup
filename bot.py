@@ -625,19 +625,19 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
         # Find the main wallet address
         main_wallet = None
         if trade_type == "buy":
-            for addr in output_addresses[:3]:
+            for addr in output_addresses:
                 for amount in tx_details.get('outputs', []):
                     if amount.get('address') == addr:
                         for token in amount.get('amount', []):
-                            if token.get('unit', '').startswith(policy_id) and int(token.get('quantity', 0)) > 0:
+                            if token.get('unit') == full_asset_name:
                                 main_wallet = addr
                                 break
         else:
-            for addr in input_addresses[:3]:
+            for addr in input_addresses:
                 for amount in tx_details.get('inputs', []):
                     if amount.get('address') == addr:
                         for token in amount.get('amount', []):
-                            if token.get('unit', '').startswith(policy_id) and int(token.get('quantity', 0)) > 0:
+                            if token.get('unit') == full_asset_name:
                                 main_wallet = addr
                                 break
         
