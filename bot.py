@@ -534,7 +534,18 @@ def analyze_transaction_improved(tx_details, policy_id):
 
         # Calculate net amounts
         ada_amount = abs(ada_out - ada_in)
-        raw_token_amount = abs(token_out - token_in)
+        
+        # For wallet transfers, use the output amount (total tokens being moved)
+        # For buys/sells, use the difference between in and out
+        has_policy_in_input = token_in > 0
+        has_policy_in_output = token_out > 0
+        
+        if has_policy_in_input and has_policy_in_output:
+            # Wallet transfer - use the output amount
+            raw_token_amount = token_out
+        else:
+            # Buy/Sell - use the difference
+            raw_token_amount = abs(token_out - token_in)
         
         # Only apply decimal conversion if decimals > 0
         # For tokens with 0 decimals, use the raw amount
@@ -557,10 +568,6 @@ def analyze_transaction_improved(tx_details, policy_id):
             'decimals': decimals,
             'full_asset_name': full_asset_name
         }
-
-        # Determine transaction type
-        has_policy_in_input = token_in > 0
-        has_policy_in_output = token_out > 0
 
         # Determine transaction type
         if has_policy_in_input and has_policy_in_output:
@@ -948,13 +955,24 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 name="⚙️ Configuration",
                 value=(
                     f"**Threshold:** `{threshold:,.2f} Tokens`\n"
-                    f"**Channel:** <#{interaction.channel_id}>\n"
+
                     f"**Transfer Notifications:** `{'Enabled' if track_transfers else 'Disabled'}`\n"
-                    f"**Image URL:** {tracker.image_url or 'None'}"
+
                 ),
                 inline=False
             )
-            
+
+            # Statistics
+            stats_text = (
+                f"**Trade Notifications:** ```0```\n"
+                f"**Transfer Notifications:** ```0```\n"
+            )
+            embed.add_field(
+                name="",
+                value=stats_text,
+                inline=False
+            )
+
             # Add monitoring details
             embed.add_field(
                 name="📊 Monitoring",
@@ -1005,7 +1023,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
 async def send_start_message(interaction, policy_id, token_name, threshold, track_transfers, image_url):
     """Send the initial token tracking started message"""
     embed = discord.Embed(
-        title="✅ Token Tracking Active",
+        title="Token Tracking Active",
         description="Successfully initialized tracking for:",
         color=discord.Color.blue()
     )
@@ -1025,7 +1043,7 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
     # Configuration section
     config_text = (
         f"**Threshold:** ```{threshold:,.2f} Tokens```\n"
-        f"**Channel:** <#{interaction.channel_id}>\n"
+
         f"**Transfer Notifications:** ```{'Enabled' if track_transfers else 'Disabled'}```\n"
 
     )
@@ -1035,16 +1053,6 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
         inline=False
     )
 
-    # Statistics
-    stats_text = (
-        f"**Trade Notifications:** ```0```\n"
-        f"**Transfer Notifications:** ```0```\n"
-    )
-    embed.add_field(
-        name="\n\n",
-        value=stats_text,
-        inline=False
-    )
 
     # Set token image if available
     if image_url:
