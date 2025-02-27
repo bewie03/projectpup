@@ -113,44 +113,13 @@ class TokenTracker:
 
 async def get_token_info(api: BlockFrostApi, policy_id: str):
     try:
-        logger.info(f"Fetching token info for policy_id: {policy_id}")
-        
-        # Get assets for the policy ID
-        assets = api.assets_policy(policy_id=policy_id)
+        # Get all assets under this policy
+        assets = await api.assets_policy(policy_id)
         if isinstance(assets, Exception):
             raise assets
-        
-        if not assets:
-            logger.warning(f"No assets found for policy_id: {policy_id}")
-            return None
-            
-        # Get the first asset's details
-        asset = assets[0]
-        # Handle asset name based on the new API response structure
-        asset_name = asset.asset if hasattr(asset, 'asset') else ''
-        asset_id = f"{policy_id}{asset_name}"
-        
-        # Get asset details
-        asset_details = api.asset(asset_id)
-        if isinstance(asset_details, Exception):
-            raise asset_details
-        
-        if not asset_details:
-            logger.warning(f"No details found for asset: {asset_id}")
-            return None
-            
-        token_info = {
-            'asset_id': asset_id,
-            'name': asset_details.onchain_metadata.get('name', 'Unknown Token') if asset_details.onchain_metadata else 'Unknown Token',
-            'description': asset_details.onchain_metadata.get('description', '') if asset_details.onchain_metadata else '',
-            'image': asset_details.onchain_metadata.get('image', '') if asset_details.onchain_metadata else ''
-        }
-        
-        logger.info(f"Successfully fetched token info: {token_info}")
-        return token_info
-        
+        return assets[0] if assets else None
     except Exception as e:
-        logger.error(f"Unexpected error in get_token_info: {str(e)}", exc_info=True)
+        logger.error(f"Error getting token info: {str(e)}", exc_info=True)
         return None
 
 async def get_transaction_details(api: BlockFrostApi, tx_hash: str):
@@ -819,75 +788,71 @@ async def status(interaction: discord.Interaction):
 @tasks.loop(seconds=60)
 async def check_transactions():
     try:
-        logger.debug("Starting transaction check cycle")
+        if not active_trackers:
+            return
+
         api = BlockFrostApi(
             project_id=os.getenv('BLOCKFROST_API_KEY'),
             base_url=ApiUrls.mainnet.value
         )
         
+        # Get latest block
+        latest_block = await api.block_latest()
+        if isinstance(latest_block, Exception):
+            raise latest_block
+
         for policy_id, tracker in active_trackers.items():
             try:
-                if not tracker.last_block:
-                    # Get latest block height
-                    latest_block = api.block_latest()
-                    if isinstance(latest_block, Exception):
-                        raise latest_block
-                    tracker.last_block = latest_block.height
-                    logger.info(f"Set initial block height for {policy_id}: {tracker.last_block}")
-                    
-                    # Update database with initial block height
-                    try:
-                        db.update_last_block(policy_id, tracker.channel_id, tracker.last_block)
-                    except Exception as e:
-                        logger.error(f"Failed to update last block in database: {str(e)}", exc_info=True)
+                # Get asset info first
+                asset_info = await get_token_info(api, policy_id)
+                if not asset_info:
+                    logger.error(f"Could not find asset info for policy {policy_id}")
                     continue
 
-                # Get transactions since last check using the correct endpoint
-                transactions = api.assets_policy_by_id_txs(policy_id, from_block=tracker.last_block)
+                # Construct full asset ID (policy_id + hex encoded asset name)
+                asset_name_hex = asset_info.asset_name.hex() if hasattr(asset_info, 'asset_name') else ''
+                full_asset_id = f"{policy_id}{asset_name_hex}"
+                
+                # Get transactions since last check
+                transactions = await api.asset_transactions(full_asset_id, from_block=tracker.last_block)
                 if isinstance(transactions, Exception):
                     raise transactions
                 logger.info(f"Found {len(transactions)} new transactions for {policy_id}")
-                
+
+                # Process each transaction
                 for tx in transactions:
                     try:
-                        tx_details = api.transaction(tx.tx_hash)
-                        if isinstance(tx_details, Exception):
-                            raise tx_details
-                            
-                        tx_type, ada_amount, token_amount, analysis_details = await analyze_transaction_improved(tx_details, policy_id)
+                        # Get full transaction details
+                        tx_details = await get_transaction_details(api, tx.tx_hash)
+                        if not tx_details:
+                            continue
+
+                        # Analyze the transaction
+                        tx_type, ada_amount, token_amount, details = await analyze_transaction_improved(tx_details, policy_id)
                         
-                        # For DEX trades, check ADA amount
+                        # For trades, check ADA amount
                         if tx_type == 'dex_trade' and ada_amount >= tracker.threshold:
-                            logger.info(f"Found DEX trade transaction: {tx.tx_hash}")
-                            embed = await create_trade_embed(
-                                tx_details, policy_id, ada_amount, token_amount, tracker, analysis_details
-                            )
-                            if embed:
-                                channel = bot.get_channel(tracker.channel_id)
-                                if channel:
-                                    await channel.send(embed=embed)
-                                    tracker.increment_trade_notifications()
+                            # Create and send trade notification
+                            embed = await create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tracker, details)
+                            channel = bot.get_channel(tracker.channel_id)
+                            if channel:
+                                await channel.send(embed=embed)
+                                tracker.increment_trade_notifications()
                                     
                         # For transfers, check token amount
                         elif tx_type == 'wallet_transfer' and tracker.track_transfers and token_amount >= tracker.threshold:
-                            logger.info(f"Found large wallet transfer: {tx.tx_hash}")
-                            transfer_embed = await create_transfer_embed(
-                                tx_details, policy_id, token_amount, tracker
-                            )
-                            if transfer_embed:
-                                channel = bot.get_channel(tracker.channel_id)
-                                if channel:
-                                    await channel.send(embed=transfer_embed)
-                                    tracker.increment_transfer_notifications()
+                            # Create and send transfer notification
+                            transfer_embed = await create_transfer_embed(tx_details, policy_id, token_amount, tracker)
+                            channel = bot.get_channel(tracker.channel_id)
+                            if channel:
+                                await channel.send(embed=transfer_embed)
+                                tracker.increment_transfer_notifications()
                     
                     except Exception as tx_e:
                         logger.error(f"Error processing transaction {tx.tx_hash}: {str(tx_e)}", exc_info=True)
                         continue
 
-                # Update last block height
-                latest_block = api.block_latest()
-                if isinstance(latest_block, Exception):
-                    raise latest_block
+                # Update last checked block
                 tracker.last_block = latest_block.height
                 logger.debug(f"Updated last block height for {policy_id}: {tracker.last_block}")
                 
