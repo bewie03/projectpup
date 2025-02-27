@@ -196,10 +196,9 @@ async def transaction_webhook(request: Request):
                 continue
                 
             # Check if any of our tracked tokens are involved
-            trackers = database.get_trackers()
-            logger.info(f"Checking {len(trackers)} tracked tokens")
+            logger.info(f"Checking {len(active_trackers)} tracked tokens")
             
-            for tracker in trackers:
+            for policy_id, tracker in active_trackers.items():
                 # Check inputs and outputs for our policy ID
                 is_involved = False
                 
@@ -213,7 +212,7 @@ async def transaction_webhook(request: Request):
                         logger.debug(f"Checking input unit: {unit}")
                         
                         # Only check policy ID in webhook handler
-                        if unit.startswith(tracker.policy_id):
+                        if unit.startswith(policy_id):
                             is_involved = True
                             logger.info(f"Found token {tracker.token_name} in transaction inputs")
                             break
@@ -231,7 +230,7 @@ async def transaction_webhook(request: Request):
                             logger.debug(f"Checking output unit: {unit}")
                             
                             # Only check policy ID in webhook handler
-                            if unit.startswith(tracker.policy_id):
+                            if unit.startswith(policy_id):
                                 is_involved = True
                                 logger.info(f"Found token {tracker.token_name} in transaction outputs")
                                 break
