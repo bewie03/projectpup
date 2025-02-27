@@ -10,6 +10,7 @@ import json
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
+from database import Database, TokenTracker as DbTokenTracker
 
 # Configure logging
 def setup_logging():
@@ -61,6 +62,9 @@ logger = setup_logging()
 # Load environment variables
 load_dotenv()
 
+# Initialize database connection
+db = Database(os.getenv('DATABASE_URL'))
+
 # Initialize Discord bot with necessary intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -81,6 +85,19 @@ class TokenTracker:
         self.transactions_24h = 0
         self.track_transfers = True
         logger.info(f"Created new TokenTracker for policy_id: {policy_id}")
+        
+        # Save to database
+        try:
+            db.save_token_tracker({
+                'policy_id': policy_id,
+                'image_url': image_url,
+                'threshold': threshold,
+                'channel_id': channel_id,
+                'last_block': None,
+                'track_transfers': True
+            })
+        except Exception as e:
+            logger.error(f"Failed to save token tracker to database: {str(e)}", exc_info=True)
 
 async def get_token_info(api: BlockFrostApi, policy_id: str):
     try:
@@ -430,6 +447,24 @@ def shorten_address(address):
 @bot.event
 async def on_ready():
     logger.info(f"Bot is ready: {bot.user}")
+    
+    # Load trackers from database
+    try:
+        saved_trackers = db.get_all_token_trackers()
+        for tracker_data in saved_trackers:
+            tracker = TokenTracker(
+                policy_id=tracker_data['policy_id'],
+                image_url=tracker_data.get('image_url'),
+                threshold=tracker_data['threshold'],
+                channel_id=tracker_data['channel_id']
+            )
+            tracker.last_block = tracker_data.get('last_block')
+            tracker.track_transfers = tracker_data.get('track_transfers', True)
+            active_trackers[tracker.policy_id] = tracker
+            logger.info(f"Loaded tracker from database: {tracker_data['policy_id']}")
+    except Exception as e:
+        logger.error(f"Failed to load trackers from database: {str(e)}", exc_info=True)
+
     try:
         synced = await bot.tree.sync()
         logger.info(f"Synced {len(synced)} command(s)")
@@ -630,6 +665,12 @@ async def check_transactions():
                     latest_block = await api.block_latest()
                     tracker.last_block = latest_block.height
                     logger.info(f"Set initial block height for {policy_id}: {tracker.last_block}")
+                    
+                    # Update database with initial block height
+                    try:
+                        db.update_last_block(policy_id, tracker.channel_id, tracker.last_block)
+                    except Exception as e:
+                        logger.error(f"Failed to update last block in database: {str(e)}", exc_info=True)
                     continue
 
                 transactions = await api.address_transactions(policy_id, from_block=tracker.last_block)
@@ -664,10 +705,16 @@ async def check_transactions():
                         logger.error(f"Error processing transaction {tx.tx_hash}: {str(tx_e)}", exc_info=True)
                         continue
 
-                # Update last checked block
+                # Update last block height
                 latest_block = await api.block_latest()
                 tracker.last_block = latest_block.height
                 logger.debug(f"Updated last block height for {policy_id}: {tracker.last_block}")
+                
+                # Update database with new block height
+                try:
+                    db.update_last_block(policy_id, tracker.channel_id, tracker.last_block)
+                except Exception as e:
+                    logger.error(f"Failed to update last block in database: {str(e)}", exc_info=True)
                 
             except Exception as tracker_e:
                 logger.error(f"Error processing tracker {policy_id}: {str(tracker_e)}", exc_info=True)
