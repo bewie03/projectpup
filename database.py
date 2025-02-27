@@ -128,12 +128,28 @@ class Database:
                 return True
             return False
         except SQLAlchemyError as e:
-            session.rollback()
             logger.error(f"Database error while removing token tracker: {str(e)}", exc_info=True)
+            session.rollback()
             return False
         finally:
             session.close()
-            
+
+    def remove_all_trackers_for_channel(self, channel_id):
+        """Remove all token trackers for a specific channel"""
+        session = self.Session()
+        try:
+            trackers = session.query(TokenTracker).filter_by(channel_id=channel_id).all()
+            for tracker in trackers:
+                session.delete(tracker)
+            session.commit()
+            return True
+        except SQLAlchemyError as e:
+            logger.error(f"Database error while removing all token trackers for channel: {str(e)}", exc_info=True)
+            session.rollback()
+            return False
+        finally:
+            session.close()
+
     def update_last_block(self, policy_id, channel_id, block_height):
         """Update the last processed block height for a token tracker"""
         session = self.Session()
