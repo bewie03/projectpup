@@ -596,15 +596,16 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             # Parse track_transfers
             track_transfers = self.track_transfers.value.lower() != "no"
 
-            # Check if already tracking
+            # Check if already tracking and remove if exists
             if policy_id in active_trackers:
-                embed = discord.Embed(
-                    title="⚠️ Already Tracking",
-                    description=f"This token is already being tracked in this channel.",
-                    color=discord.Color.yellow()
-                )
-                await message.edit(embed=embed)
-                return
+                # Remove from memory
+                old_tracker = active_trackers.pop(policy_id)
+                # Remove from database
+                try:
+                    db.delete_token_tracker(policy_id, old_tracker.channel_id)
+                except Exception as e:
+                    logger.error(f"Failed to delete old token tracker from database: {str(e)}", exc_info=True)
+                logger.info(f"Removed existing tracker for {policy_id}")
 
             # Create new tracker
             tracker = TokenTracker(
@@ -766,7 +767,7 @@ async def status_command(interaction: discord.Interaction):
     try:
         if not active_trackers:
             embed = discord.Embed(
-                title="📊 Token Tracking Status",
+                title="Token Tracking Status",
                 description="No tokens are currently being tracked in this channel.",
                 color=discord.Color.light_grey()
             )
@@ -774,8 +775,8 @@ async def status_command(interaction: discord.Interaction):
             return
 
         embed = discord.Embed(
-            title="📊 Token Tracking Status",
-            description="Here are all the tokens currently being tracked in this channel:",
+            title="Token Tracking Status",
+            description="Currently tracked tokens in this channel:",
             color=discord.Color.blue()
         )
 
@@ -788,12 +789,12 @@ async def status_command(interaction: discord.Interaction):
             
             # Add field for each token
             embed.add_field(
-                name=f"🪙 {token_name}",
+                name=token_name,
                 value=(
-                    f"**Policy ID:** `{policy_id}`\n"
-                    f"**Threshold:** `{tracker.threshold:,.2f} Tokens`\n"
-                    f"**Transfer Notifications:** {'Enabled' if tracker.track_transfers else 'Disabled'}\n"
-                    f"**Last Block:** `{tracker.last_block or 'Not started'}`"
+                    f"Policy ID: `{policy_id}`\n"
+                    f"Threshold: `{tracker.threshold:,.2f}`\n"
+                    f"Transfers: `{'On' if tracker.track_transfers else 'Off'}`\n"
+                    f"Block: `{tracker.last_block or 'Not started'}`"
                 ),
                 inline=False
             )
@@ -803,23 +804,30 @@ async def status_command(interaction: discord.Interaction):
                 embed.set_thumbnail(url=tracker.image_url)
 
         # Add footer with timestamp
-        embed.set_footer(text=f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        embed.set_footer(text=f"Updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Create view with refresh button
         class StatusView(discord.ui.View):
             def __init__(self):
                 super().__init__(timeout=None)
 
-            @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.primary, custom_id="refresh_status")
+            @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, custom_id="refresh_status")
             async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-                # Defer the response since we're going to send a new message
-                await interaction.response.defer()
-                # Create new status message
-                await status_command.callback(interaction)
-                # Delete the old message
-                await interaction.message.delete()
+                try:
+                    # Defer the response
+                    await interaction.response.defer()
+                    
+                    # Create new embed
+                    new_embed = await status_command(interaction)
+                    
+                    # Edit the original message
+                    await interaction.message.edit(embed=new_embed, view=StatusView())
+                except Exception as e:
+                    logger.error(f"Error refreshing status: {str(e)}", exc_info=True)
+                    await interaction.followup.send("Failed to refresh status. Please try again.", ephemeral=True)
 
         await interaction.response.send_message(embed=embed, view=StatusView())
+        return embed  # Return embed for refresh functionality
 
     except Exception as e:
         logger.error(f"Error in status command: {str(e)}", exc_info=True)
