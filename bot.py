@@ -941,13 +941,31 @@ async def check_transactions():
                                     all_transactions = []
                                     logger.info(f"Found {len(policy_assets)} assets under policy")
                                     
+                                    # Debug log the first asset's structure
+                                    if policy_assets:
+                                        first_asset = policy_assets[0]
+                                        logger.info(f"Asset structure: {vars(first_asset)}")
+                                    
                                     # Get transactions for each asset
                                     for asset in policy_assets:
                                         try:
-                                            # Construct full asset ID
-                                            asset_id = f"{policy_id}{asset.asset_name}"
-                                            page = 1
+                                            # Get the asset name - try different possible attribute names
+                                            if hasattr(asset, 'asset'):
+                                                asset_name = asset.asset
+                                            elif hasattr(asset, 'name'):
+                                                asset_name = asset.name
+                                            elif hasattr(asset, 'unit'):
+                                                asset_name = asset.unit.replace(policy_id, '')
+                                            else:
+                                                # Log all available attributes
+                                                logger.warning(f"Could not find asset name in object with attributes: {vars(asset)}")
+                                                continue
                                             
+                                            # Construct full asset ID
+                                            asset_id = f"{policy_id}{asset_name}"
+                                            logger.info(f"Processing asset: {asset_id}")
+                                            
+                                            page = 1
                                             while True:
                                                 # Get transactions for this asset
                                                 asset_txs = api.asset_transactions(
@@ -976,7 +994,7 @@ async def check_transactions():
                                                 page += 1
                                                 
                                         except Exception as asset_e:
-                                            logger.error(f"Error getting transactions for asset {asset_id}: {str(asset_e)}", exc_info=True)
+                                            logger.error(f"Error getting transactions for asset {asset_id if 'asset_id' in locals() else 'unknown'}: {str(asset_e)}", exc_info=True)
                                             continue
                                             
                                     # Remove duplicates by tx_hash
