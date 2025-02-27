@@ -937,8 +937,8 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 name="⚙️ Configuration",
                 value=(
                     f"**Threshold:** `{threshold:,.2f} Tokens`\n"
-                    f"**Channel:** {interaction.channel.mention}\n"
-                    f"**Transfer Notifications:** {'Enabled' if track_transfers else 'Disabled'}\n"
+                    f"**Channel:** <#{interaction.channel_id}>\n"
+                    f"**Transfer Notifications:** `{'Enabled' if track_transfers else 'Disabled'}`\n"
                     f"**Image URL:** {tracker.image_url or 'None'}"
                 ),
                 inline=False
@@ -996,26 +996,26 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
     embed = discord.Embed(
         title="✅ Token Tracking Active",
         description="Successfully initialized tracking for:",
-        color=discord.Color.green()
+        color=discord.Color.blue()
     )
 
     # Basic token info
     embed.add_field(
         name="Token",
-        value=f"`{token_name}`",
+        value=f"```{token_name}```",
         inline=True
     )
     embed.add_field(
         name="Policy ID",
-        value=f"`{policy_id}`",
+        value=f"```{policy_id}```",
         inline=False
     )
 
     # Configuration section
     config_text = (
-        f"**Threshold:** `{threshold:,.2f} Tokens`\n"
+        f"**Threshold:** ```{threshold:,.2f} Tokens```\n"
         f"**Channel:** <#{interaction.channel_id}>\n"
-        f"**Transfer Notifications:** `{'Enabled' if track_transfers else 'Disabled'}`\n"
+        f"**Transfer Notifications:** ```{'Enabled' if track_transfers else 'Disabled'}```\n"
         f"**Image:** [View]({image_url})"
     )
     embed.add_field(
@@ -1026,18 +1026,15 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
 
     # Statistics
     stats_text = (
-        f"**Trade Notifications:** `0`\n"
-        f"**Transfer Notifications:** `0`\n"
-        f"**Last Block:** `None`"
+        f"**Trade Notifications:** ```0```\n"
+        f"**Transfer Notifications:** ```0```\n"
+        f"**Last Block:** ```None```"
     )
     embed.add_field(
         name="📊 Statistics",
         value=stats_text,
         inline=False
     )
-
-    # Set footer with tracking start time
-    embed.set_footer(text=f"Started tracking at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
     # Set token image if available
     if image_url:
@@ -1132,20 +1129,20 @@ async def status(interaction: discord.Interaction):
             # Basic token info
             embed.add_field(
                 name="Token",
-                value=f"`{tracker.token_name}`",
+                value=f"```{tracker.token_name}```",
                 inline=True
             )
             embed.add_field(
                 name="Policy ID",
-                value=f"`{tracker.policy_id}`",
+                value=f"```{tracker.policy_id}```",
                 inline=False
             )
 
             # Configuration section
             config_text = (
-                f"**Threshold:** `{tracker.threshold:,.2f} Tokens`\n"
+                f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
                 f"**Channel:** <#{tracker.channel_id}>\n"
-                f"**Transfer Notifications:** `{'Enabled' if tracker.track_transfers else 'Disabled'}`\n"
+                f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
                 f"**Image:** [View]({tracker.image_url})"
             )
             embed.add_field(
@@ -1156,18 +1153,15 @@ async def status(interaction: discord.Interaction):
 
             # Statistics
             stats_text = (
-                f"**Trade Notifications:** `{tracker.trade_notifications}`\n"
-                f"**Transfer Notifications:** `{tracker.transfer_notifications}`\n"
-                f"**Last Block:** `{tracker.last_block or 'None'}`"
+                f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
+                f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
+                f"**Last Block:** ```{tracker.last_block or 'None'}```"
             )
             embed.add_field(
                 name="📊 Statistics",
                 value=stats_text,
                 inline=False
             )
-
-            # Set footer with tracking start time
-            embed.set_footer(text=f"Started tracking at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
             # Set token image if available
             if tracker.image_url:
