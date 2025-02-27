@@ -300,7 +300,7 @@ async def on_ready():
     """Called when the bot is ready"""
     try:
         # Load all trackers from database into memory
-        trackers = database.get_all_token_trackers()
+        trackers = database.get_trackers()
         for tracker in trackers:
             tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
             active_trackers[tracker_key] = TokenTracker(
@@ -1394,6 +1394,37 @@ async def stop(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Error in stop command: {str(e)}", exc_info=True)
         await interaction.response.send_message("Failed to process stop command. Please try again.", ephemeral=True)
+
+@tasks.loop(minutes=5)
+async def refresh_trackers():
+    """Refresh trackers from database periodically"""
+    try:
+        # Load all trackers from database
+        trackers = database.get_trackers()
+        new_trackers = {}
+        
+        for tracker in trackers:
+            tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
+            new_trackers[tracker_key] = TokenTracker(
+                policy_id=tracker.policy_id,
+                channel_id=tracker.channel_id,
+                token_name=tracker.token_name,
+                image_url=tracker.image_url,
+                threshold=tracker.threshold,
+                track_transfers=tracker.track_transfers,
+                last_block=tracker.last_block,
+                trade_notifications=tracker.trade_notifications,
+                transfer_notifications=tracker.transfer_notifications,
+                token_info=tracker.token_info
+            )
+            
+        # Update active trackers
+        global active_trackers
+        active_trackers = new_trackers
+        logger.info(f"Refreshed {len(active_trackers)} trackers from database")
+        
+    except Exception as e:
+        logger.error(f"Error refreshing trackers: {str(e)}", exc_info=True)
 
 # Run the bot
 if __name__ == "__main__":

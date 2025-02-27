@@ -119,36 +119,29 @@ def inspect_database():
     cur = conn.cursor()
     
     try:
-        # Get column names
-        cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'trackers'
-            ORDER BY ordinal_position
-        """)
-        columns = [col[0] for col in cur.fetchall()]
-        
         # Get all trackers
         cur.execute('SELECT * FROM trackers')
-        rows = cur.fetchall()
+        trackers = cur.fetchall()
         
-        if not rows:
+        print("\n=== Current Trackers ===")
+        if not trackers:
             print("No trackers found in database")
-            return
-            
-        print("\nCurrent trackers in database:")
-        print("-" * 80)
-        
-        for row in rows:
-            print("\nTracker:")
-            for i, value in enumerate(row):
-                if columns[i] == 'token_info' and value:
-                    # Pretty print JSON
-                    print(f"{columns[i]}: {json.dumps(value, indent=2)}")
-                else:
-                    print(f"{columns[i]}: {value}")
-            print("-" * 40)
-            
+        else:
+            print(f"Found {len(trackers)} trackers:")
+            for tracker in trackers:
+                print(f"\nPolicy ID: {tracker[0]}")
+                print(f"Channel ID: {tracker[1]}")
+                print(f"Token Name: {tracker[2]}")
+                print(f"Image URL: {tracker[3]}")
+                print(f"Threshold: {tracker[4]}")
+                print(f"Track Transfers: {tracker[5]}")
+                print(f"Last Block: {tracker[6]}")
+                print(f"Trade Notifications: {tracker[7]}")
+                print(f"Transfer Notifications: {tracker[8]}")
+                if tracker[9]:  # token_info
+                    print(f"Token Info: {json.dumps(tracker[9], indent=2)}")
+                print("-" * 50)
+                
     except Exception as e:
         print(f"Error inspecting database: {str(e)}")
     finally:
@@ -156,9 +149,6 @@ def inspect_database():
         conn.close()
 
 if __name__ == "__main__":
-    # Recreate tables with correct schema
-    recreate_tables()
-    
-    # Show detailed info
+    # Show database info
     show_table_info()
     inspect_database()
