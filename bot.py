@@ -812,8 +812,10 @@ async def status_command(interaction: discord.Interaction):
 
             @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.primary, custom_id="refresh_status")
             async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-                # Call status command again
-                await status_command(interaction)
+                # Defer the response since we're going to send a new message
+                await interaction.response.defer()
+                # Create new status message
+                await status_command.callback(interaction)
                 # Delete the old message
                 await interaction.message.delete()
 
@@ -854,8 +856,8 @@ async def check_transactions():
                         logger.error(f"Failed to update last block in database: {str(e)}", exc_info=True)
                     continue
 
-                # Get transactions since last check
-                transactions = api.address_transactions(policy_id, from_block=tracker.last_block)
+                # Get transactions since last check using the correct endpoint
+                transactions = api.assets_policy_by_id_txs(policy_id, from_block=tracker.last_block)
                 if isinstance(transactions, Exception):
                     raise transactions
                 logger.info(f"Found {len(transactions)} new transactions for {policy_id}")
