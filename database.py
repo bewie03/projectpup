@@ -114,7 +114,7 @@ class Database:
         finally:
             session.close()
             
-    def remove_tracker(self, policy_id, channel_id):
+    def delete_token_tracker(self, policy_id, channel_id):
         """Remove a token tracker"""
         session = self.Session()
         try:
