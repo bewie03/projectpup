@@ -931,14 +931,41 @@ async def check_transactions():
                         if hasattr(tx_e, 'status_code'):
                             if tx_e.status_code == 404:
                                 logger.warning(f"Asset {full_asset_id} not found. Trying policy transactions...")
-                                # Fallback to policy transactions
-                                policy_txs = api.assets_policy_by_id_txs(policy_id)
-                                if isinstance(policy_txs, Exception):
-                                    raise policy_txs
-                                # Filter by block height if needed
-                                if tracker.last_block:
-                                    policy_txs = [tx for tx in policy_txs if tx.block_height > tracker.last_block]
-                                all_transactions = policy_txs
+                                # Fallback to policy transactions with pagination
+                                try:
+                                    policy_txs = []
+                                    page = 1
+                                    while True:
+                                        page_txs = api.assets_policy_txs(
+                                            policy_id=policy_id,
+                                            count=100,
+                                            page=page,
+                                            order='desc'
+                                        )
+                                        if isinstance(page_txs, Exception):
+                                            raise page_txs
+                                        if not page_txs:
+                                            break
+                                            
+                                        logger.info(f"Found {len(page_txs)} policy transactions on page {page}")
+                                        
+                                        # Filter by block height if needed
+                                        if tracker.last_block:
+                                            page_txs = [tx for tx in page_txs if tx.block_height > tracker.last_block]
+                                            
+                                        policy_txs.extend(page_txs)
+                                        
+                                        # If we got less than 100 transactions, we've hit the end
+                                        if len(page_txs) < 100:
+                                            break
+                                            
+                                        page += 1
+                                        
+                                    all_transactions = policy_txs
+                                    logger.info(f"Found total of {len(policy_txs)} policy transactions")
+                                except Exception as policy_e:
+                                    logger.error(f"Error getting policy transactions: {str(policy_e)}", exc_info=True)
+                                    raise policy_e
                             elif tx_e.status_code == 429:
                                 logger.warning("Rate limit reached, waiting for next cycle")
                                 break
