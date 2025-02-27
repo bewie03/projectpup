@@ -790,26 +790,29 @@ class TokenControls(discord.ui.View):
     @discord.ui.button(label="Stop Tracking", style=discord.ButtonStyle.danger, emoji="⛔")
     async def stop_tracking(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            # Remove from database
-            database.remove_tracker(interaction.guild_id, self.policy_id)
-            
-            # Remove from active trackers
             if self.policy_id in active_trackers:
+                # Remove from database
+                database.delete_token_tracker(self.policy_id, interaction.channel_id)
+                
+                # Remove from active trackers
                 del active_trackers[self.policy_id]
             
-            # Update message
-            embed = discord.Embed(
-                title="✅ Token Tracking Stopped",
-                description=f"Successfully stopped tracking token with policy ID: ```{self.policy_id}```",
-                color=discord.Color.green()
-            )
-            
-            # Disable all buttons
-            for child in self.children:
-                child.disabled = True
-            
-            await interaction.response.edit_message(embed=embed, view=self)
-            
+                # Update message
+                embed = discord.Embed(
+                    title="✅ Token Tracking Stopped",
+                    description=f"Successfully stopped tracking token with policy ID: ```{self.policy_id}```",
+                    color=discord.Color.green()
+                )
+                
+                # Disable all buttons
+                for child in self.children:
+                    child.disabled = True
+                
+                await interaction.response.edit_message(embed=embed, view=self)
+                logger.info(f"Stopped tracking token: {self.policy_id}")
+            else:
+                await interaction.response.send_message("Not tracking this token anymore.", ephemeral=True)
+                
         except Exception as e:
             logger.error(f"Error stopping token tracking: {str(e)}", exc_info=True)
             await interaction.response.send_message("Failed to stop token tracking. Please try again.", ephemeral=True)
@@ -827,7 +830,16 @@ class TokenControls(discord.ui.View):
             tracker.track_transfers = not tracker.track_transfers
             
             # Update in database
-            database.update_tracker_transfers(interaction.guild_id, self.policy_id, tracker.track_transfers)
+            database.save_token_tracker({
+                'policy_id': self.policy_id,
+                'token_name': tracker.token_name,
+                'image_url': tracker.image_url,
+                'threshold': tracker.threshold,
+                'channel_id': interaction.channel_id,
+                'last_block': tracker.last_block,
+                'track_transfers': tracker.track_transfers,
+                'token_info': tracker.token_info
+            })
 
             # Create updated embed
             embed = discord.Embed(
@@ -851,12 +863,12 @@ class TokenControls(discord.ui.View):
             # Configuration section
             config_text = (
                 f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
-                f"**Channel:** <#{tracker.channel_id}>\n"
+
                 f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
-                f"**Image:** [View]({tracker.image_url})"
+
             )
             embed.add_field(
-                name="Configuration",
+                name="",
                 value=config_text,
                 inline=False
             )
@@ -867,7 +879,7 @@ class TokenControls(discord.ui.View):
                 f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
             )
             embed.add_field(
-                name="Statistics",
+                name="",
                 value=stats_text,
                 inline=False
             )
@@ -877,6 +889,7 @@ class TokenControls(discord.ui.View):
                 embed.set_thumbnail(url=tracker.image_url)
 
             await interaction.response.edit_message(embed=embed)
+            logger.info(f"Toggled transfer notifications for {tracker.token_name} to {tracker.track_transfers}")
             
         except Exception as e:
             logger.error(f"Error toggling transfers: {str(e)}", exc_info=True)
