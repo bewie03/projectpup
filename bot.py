@@ -198,85 +198,111 @@ async def transaction_webhook(request: Request):
             logger.info(f"Checking transaction against {len(trackers)} tracked tokens")
             
             for tracker in trackers:
-                # Create composite key
-                tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
-                
-                # Skip if tracker not in memory (shouldn't happen)
-                if tracker_key not in active_trackers:
-                    logger.warning(f"Tracker {tracker_key} not found in memory, skipping")
+                try:
+                    # Create composite key from policy_id and channel_id
+                    tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
+                    
+                    # Skip if tracker not in memory (shouldn't happen)
+                    if tracker_key not in active_trackers:
+                        logger.warning(f"Tracker {tracker_key} not found in memory, skipping")
+                        continue
+                        
+                    # Get active tracker from memory
+                    active_tracker = active_trackers[tracker_key]
+                    
+                    # Process transaction for this tracker
+                    await process_transaction_for_tracker(active_tracker, tx, inputs, outputs, tx_hash)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing transaction for tracker {tracker_key}: {str(e)}", exc_info=True)
                     continue
-                    
-                # Get active tracker from memory
-                active_tracker = active_trackers[tracker_key]
-                
-                # Check if any of our tracked tokens are involved
-                is_involved = False
-                
-                # Check inputs and outputs for our policy ID
-                input_addresses = []
-                for inp in inputs:
-                    input_addresses.append(inp.get('address', ''))
-                    for amt in inp.get('amount', []):
-                        unit = amt.get('unit', '')
-                        # Debug log the unit we're checking
-                        logger.debug(f"Checking input unit: {unit}")
-                        
-                        # Only check policy ID in webhook handler
-                        if unit.startswith(tracker.policy_id):
-                            is_involved = True
-                            logger.info(f"Found token {active_tracker.token_name} in transaction inputs")
-                            break
-                    if is_involved:
-                        break
-                        
-                # Check outputs if not found in inputs
-                if not is_involved:
-                    output_addresses = []
-                    for out in outputs:
-                        output_addresses.append(out.get('address', ''))
-                        for amt in out.get('amount', []):
-                            unit = amt.get('unit', '')
-                            # Debug log the unit we're checking
-                            logger.debug(f"Checking output unit: {unit}")
-                            
-                            # Only check policy ID in webhook handler
-                            if unit.startswith(tracker.policy_id):
-                                is_involved = True
-                                logger.info(f"Found token {active_tracker.token_name} in transaction outputs")
-                                break
-                        if is_involved:
-                            break
-                
-                if is_involved:
-                    # Log token involvement
-                    logger.info(f"Analyzing transaction for {active_tracker.token_name} ({active_tracker.policy_id})")
-                    
-                    # Create transaction data structure for analysis
-                    analysis_data = {
-                        'inputs': inputs,
-                        'outputs': outputs,
-                        'tx': tx
-                    }
-                    
-                    # Analyze the transaction
-                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, active_tracker.policy_id)
-                    
-                    # Add transaction hash to details
-                    details['hash'] = tx_hash
-                    
-                    # Log analysis results
-                    logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
-                    
-                    # Send notification
-                    await send_transaction_notification(active_tracker, tx_type, ada_amount, token_amount, details)
-                else:
-                    logger.debug(f"Token {active_tracker.token_name} not involved in transaction {tx_hash}")
         
         return {"status": "ok"}
         
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+async def process_transaction_for_tracker(active_tracker, tx, inputs, outputs, tx_hash):
+    """Process a transaction for a specific token tracker"""
+    # Check if channel is accessible
+    channel = bot.get_channel(active_tracker.channel_id)
+    if not channel:
+        for guild in bot.guilds:
+            channel = guild.get_channel(active_tracker.channel_id)
+            if channel:
+                break
+    
+    if not channel:
+        logger.error(f"Channel {active_tracker.channel_id} not found in any guild")
+        # Remove tracker since channel is not accessible
+        tracker_key = f"{active_tracker.policy_id}:{active_tracker.channel_id}"
+        del active_trackers[tracker_key]
+        database.delete_token_tracker(active_tracker.policy_id, active_tracker.channel_id)
+        return
+    
+    # Check if any of our tracked tokens are involved
+    is_involved = False
+    
+    # Check inputs and outputs for our policy ID
+    input_addresses = []
+    for inp in inputs:
+        input_addresses.append(inp.get('address', ''))
+        for amt in inp.get('amount', []):
+            unit = amt.get('unit', '')
+            # Debug log the unit we're checking
+            logger.debug(f"Checking input unit: {unit}")
+            
+            # Only check policy ID in webhook handler
+            if unit.startswith(active_tracker.policy_id):
+                is_involved = True
+                logger.info(f"Found token {active_tracker.token_name} in transaction inputs")
+                break
+        if is_involved:
+            break
+        
+    # Check outputs if not found in inputs
+    if not is_involved:
+        output_addresses = []
+        for out in outputs:
+            output_addresses.append(out.get('address', ''))
+            for amt in out.get('amount', []):
+                unit = amt.get('unit', '')
+                # Debug log the unit we're checking
+                logger.debug(f"Checking output unit: {unit}")
+                
+                # Only check policy ID in webhook handler
+                if unit.startswith(active_tracker.policy_id):
+                    is_involved = True
+                    logger.info(f"Found token {active_tracker.token_name} in transaction outputs")
+                    break
+            if is_involved:
+                break
+    
+    if is_involved:
+        # Log token involvement
+        logger.info(f"Analyzing transaction for {active_tracker.token_name} ({active_tracker.policy_id})")
+        
+        # Create transaction data structure for analysis
+        analysis_data = {
+            'inputs': inputs,
+            'outputs': outputs,
+            'tx': tx
+        }
+        
+        # Analyze the transaction
+        tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, active_tracker.policy_id)
+        
+        # Add transaction hash to details
+        details['hash'] = tx_hash
+        
+        # Log analysis results
+        logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
+        
+        # Send notification
+        await send_transaction_notification(active_tracker, tx_type, ada_amount, token_amount, details)
+    else:
+        logger.debug(f"Token {active_tracker.token_name} not involved in transaction {tx_hash}")
 
 def run_webhook_server():
     """Run the FastAPI webhook server"""
@@ -308,6 +334,22 @@ async def on_ready():
                     transfer_notifications=tracker.transfer_notifications,
                     token_info=tracker.token_info
                 )
+                
+                # Check if channel is accessible
+                channel = bot.get_channel(tracker.channel_id)
+                if not channel:
+                    for guild in bot.guilds:
+                        channel = guild.get_channel(tracker.channel_id)
+                        if channel:
+                            break
+                
+                if not channel:
+                    logger.error(f"Channel {tracker.channel_id} not found in any guild")
+                    # Remove tracker since channel is not accessible
+                    del active_trackers[tracker_key]
+                    database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
+                    continue
+                
                 logger.info(f"Loaded tracker for {tracker.token_name} in channel {tracker.channel_id}")
             except Exception as e:
                 logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
