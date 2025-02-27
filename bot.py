@@ -820,8 +820,39 @@ async def status_command(interaction: discord.Interaction):
                     # Defer the response
                     await interaction.response.defer()
                     
-                    # Create new embed
-                    new_embed = await status_command(interaction)
+                    # Create new embed with fresh data
+                    new_embed = discord.Embed(
+                        title="Token Tracking Status",
+                        description="Currently tracked tokens in this channel:",
+                        color=discord.Color.blue()
+                    )
+
+                    for policy_id, tracker in active_trackers.items():
+                        # Only show trackers for this channel
+                        if tracker.channel_id != interaction.channel_id:
+                            continue
+
+                        token_name = tracker.token_name
+                        
+                        # Add field for each token
+                        new_embed.add_field(
+                            name=token_name,
+                            value=(
+                                f"Policy ID: `{policy_id}`\n"
+                                f"Threshold: `{tracker.threshold:,.2f}`\n"
+                                f"Transfers: `{'On' if tracker.track_transfers else 'Off'}`\n"
+                                f"Trade Alerts: `{tracker.trade_notifications}`\n"
+                                f"Transfer Alerts: `{tracker.transfer_notifications}`"
+                            ),
+                            inline=False
+                        )
+
+                        # Set thumbnail to the first token's image
+                        if tracker.image_url and not new_embed.thumbnail:
+                            new_embed.set_thumbnail(url=tracker.image_url)
+
+                    # Add footer with timestamp
+                    new_embed.set_footer(text=f"Updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     
                     # Edit the original message
                     await interaction.message.edit(embed=new_embed, view=StatusView())
@@ -868,7 +899,7 @@ async def check_transactions():
                     continue
 
                 # Get transactions since last check using the correct endpoint
-                transactions = api.assets_transactions_by_policy(policy_id, from_block=tracker.last_block)
+                transactions = api.asset_policy_transactions(policy_id, from_block=tracker.last_block)
                 if isinstance(transactions, Exception):
                     raise transactions
                 logger.info(f"Found {len(transactions)} new transactions for {policy_id}")
