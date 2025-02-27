@@ -515,183 +515,316 @@ class TokenControls(discord.ui.View):
             logger.error(f"Error in toggle transfers button: {str(e)}", exc_info=True)
             await interaction.response.send_message("Failed to toggle transfers. Please try again.", ephemeral=True)
 
-@bot.tree.command(name="start", description="Start tracking token purchases and transfers")
-async def start(interaction: discord.Interaction, policy_id: str, image_url: str, threshold: float, track_transfers: bool = True):
-    try:
-        logger.info(f"Starting token tracking for policy_id: {policy_id}")
-        embed = discord.Embed(
-            title="🚀 Token Tracking Initialized",
-            description="Successfully started monitoring token activity on the Cardano blockchain.",
-            color=discord.Color.brand_green()
+class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
+    def __init__(self):
+        super().__init__()
+        self.policy_id = discord.ui.TextInput(
+            label="Policy ID",
+            placeholder="Enter the token's policy ID",
+            style=discord.TextStyle.short,
+            required=True,
+            min_length=56,
+            max_length=56
+        )
+        self.threshold = discord.ui.TextInput(
+            label="Minimum ADA Threshold",
+            placeholder="Enter minimum ADA amount for notifications (default: 1000)",
+            style=discord.TextStyle.short,
+            required=False,
+            default="1000"
+        )
+        self.track_transfers = discord.ui.TextInput(
+            label="Track Transfers",
+            placeholder="Type 'yes' or 'no' (default: yes)",
+            style=discord.TextStyle.short,
+            required=False,
+            default="yes"
         )
         
-        tracking_types = []
-        if threshold > 0:
-            tracking_types.append("Token Purchases")
-        if track_transfers:
-            tracking_types.append("Wallet Transfers")
-        
-        embed.add_field(
-            name="🎯 Tracking Types",
-            value=f"```{', '.join(tracking_types)}```",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="📋 Token Policy ID",
-            value=f"`{policy_id}`",
-            inline=False
-        )
-        
-        if threshold > 0:
-            embed.add_field(
-                name="💎 Purchase Threshold",
-                value=f"```{threshold:,.2f} ADA```",
-                inline=False
+        self.add_item(self.policy_id)
+        self.add_item(self.threshold)
+        self.add_item(self.track_transfers)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Create loading message
+            loading_embed = discord.Embed(
+                title="🔍 Initializing Token Tracking",
+                description="Please wait while I fetch token information...",
+                color=discord.Color.blue()
             )
-        
-        embed.set_footer(text="Tracking started at")
-        embed.timestamp = discord.utils.utcnow()
-        embed.set_thumbnail(url=image_url)
-        
-        # Store tracking configuration
-        tracker = TokenTracker(
-            policy_id=policy_id,
-            image_url=image_url,
-            threshold=threshold,
-            channel_id=interaction.channel_id
-        )
-        tracker.track_transfers = track_transfers
-        active_trackers[policy_id] = tracker
-        
-        logger.info(f"Token tracking started successfully for policy_id: {policy_id}")
-        await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=loading_embed)
+            message = await interaction.original_response()
 
-    except Exception as e:
-        logger.error(f"Error starting tracker: {str(e)}", exc_info=True)
-        error_embed = discord.Embed(
-            title="❌ Error Starting Tracker",
-            description=f"```{str(e)}```",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+            policy_id = self.policy_id.value.strip()
+            
+            # Validate and convert threshold
+            try:
+                threshold = float(self.threshold.value or "1000")
+                if threshold <= 0:
+                    raise ValueError("Threshold must be positive")
+            except ValueError:
+                error_embed = discord.Embed(
+                    title="❌ Invalid Threshold",
+                    description="Please enter a valid positive number for the threshold.",
+                    color=discord.Color.red()
+                )
+                await message.edit(embed=error_embed)
+                return
 
-@bot.tree.command(name="token_info", description="Get detailed information about the tracked token")
-async def token_info(interaction: discord.Interaction, policy_id: str):
-    try:
-        api = BlockFrostApi(
-            project_id=os.getenv('BLOCKFROST_API_KEY'),
-            base_url=ApiUrls.mainnet.value
-        )
-        
-        token_info = await get_token_info(api, policy_id)
-        if not token_info:
-            raise ValueError("Token not found")
-        
-        embed = discord.Embed(
-            title="📊 Token Information",
-            description=f"Detailed information for token under policy ID: `{policy_id}`",
-            color=discord.Color.blue()
-        )
-        
-        # Token Details
-        embed.add_field(
-            name="🪙 Token Name",
-            value=f"```{token_info.asset_name.decode() if token_info.asset_name else 'N/A'}```",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="📈 Initial Mint Tx",
-            value=f"[View Transaction](https://cardanoscan.io/transaction/{token_info.initial_mint_tx_hash})",
-            inline=True
-        )
-        
-        # Supply Information
-        embed.add_field(
-            name="💎 Total Supply",
-            value=f"```{int(token_info.quantity):,}```",
-            inline=False
-        )
-        
-        if token_info.metadata:
-            if token_info.metadata.get('description'):
+            # Parse track_transfers
+            track_transfers = self.track_transfers.value.lower() != "no"
+
+            # Check if already tracking
+            if policy_id in active_trackers:
+                embed = discord.Embed(
+                    title="⚠️ Already Tracking",
+                    description=f"This token is already being tracked in this channel.",
+                    color=discord.Color.yellow()
+                )
+                await message.edit(embed=embed)
+                return
+
+            # Create new tracker
+            tracker = TokenTracker(
+                policy_id=policy_id,
+                image_url=None,
+                threshold=threshold,
+                channel_id=interaction.channel_id
+            )
+            tracker.track_transfers = track_transfers
+            
+            # Get token info
+            api = BlockFrostApi(
+                project_id=os.getenv('BLOCKFROST_API_KEY'),
+                base_url=ApiUrls.mainnet.value
+            )
+            token_info = await get_token_info(api, policy_id)
+            
+            if token_info:
+                tracker.token_info = token_info
+                tracker.image_url = token_info.get('image', '')
+                
+                # Create success embed
+                embed = discord.Embed(
+                    title="✅ Token Tracking Started",
+                    description=(
+                        f"Successfully initialized tracking for:\n"
+                        f"**Token:** {token_info.get('name', 'Unknown Token')}\n"
+                        f"**Policy ID:** `{policy_id}`"
+                    ),
+                    color=discord.Color.green()
+                )
+                
+                # Add token image if available
+                if tracker.image_url:
+                    embed.set_thumbnail(url=tracker.image_url)
+                
+                # Add configuration fields
                 embed.add_field(
-                    name="📝 Description",
-                    value=f"```{token_info.metadata['description']}```",
+                    name="⚙️ Configuration",
+                    value=(
+                        f"**Threshold:** `{threshold:,.2f} ADA`\n"
+                        f"**Channel:** {interaction.channel.mention}\n"
+                        f"**Transfer Notifications:** {'Enabled' if track_transfers else 'Disabled'}"
+                    ),
                     inline=False
                 )
-            
-            if token_info.metadata.get('ticker'):
+                
+                # Add monitoring details
                 embed.add_field(
-                    name="🏷️ Ticker",
-                    value=f"```{token_info.metadata['ticker']}```",
+                    name="📊 Monitoring",
+                    value=(
+                        "• DEX Trades (Buys/Sells)\n"
+                        "• Wallet Transfers\n"
+                        "• Price per Token\n"
+                        "• Transaction Details"
+                    ),
                     inline=True
                 )
-        
-        # Add timestamp
-        embed.timestamp = discord.utils.utcnow()
-        embed.set_footer(text="Data retrieved at")
-        
-        await interaction.response.send_message(embed=embed)
-        
-    except Exception as e:
-        logger.error(f"Error fetching token info: {str(e)}", exc_info=True)
-        error_embed = discord.Embed(
-            title="❌ Error Fetching Token Info",
-            description=f"```{str(e)}```",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+                
+                # Add notification details
+                embed.add_field(
+                    name="🔔 Notifications",
+                    value=(
+                        "• Trade Amount\n"
+                        "• Wallet Addresses\n"
+                        "• Block Height\n"
+                        "• Transaction Hash"
+                    ),
+                    inline=True
+                )
+                
+                # Add footer with timestamp
+                embed.set_footer(text=f"Started tracking at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Create view with buttons
+                view = TokenControls(policy_id)
+                
+                # Update the loading message
+                await message.edit(embed=embed, view=view)
+                
+                # Save to memory and database
+                active_trackers[policy_id] = tracker
+                try:
+                    db.save_token_tracker({
+                        'policy_id': policy_id,
+                        'image_url': tracker.image_url,
+                        'threshold': threshold,
+                        'channel_id': interaction.channel_id,
+                        'last_block': None,
+                        'track_transfers': track_transfers
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to save token tracker to database: {str(e)}", exc_info=True)
+                
+                logger.info(f"Started tracking token: {policy_id}")
+            else:
+                # Create error embed for invalid token
+                embed = discord.Embed(
+                    title="❌ Token Not Found",
+                    description=(
+                        f"Could not find token information for the given policy ID.\n"
+                        f"Please verify the policy ID and try again."
+                    ),
+                    color=discord.Color.red()
+                )
+                await message.edit(embed=embed)
+                
+        except Exception as e:
+            logger.error(f"Error in token setup: {str(e)}", exc_info=True)
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description="Failed to start tracking. Please check the policy ID and try again.",
+                color=discord.Color.red()
+            )
+            await message.edit(embed=error_embed)
 
-@bot.tree.command(name="volume", description="Get 24-hour trading volume for the tracked token")
-async def volume(interaction: discord.Interaction, policy_id: str):
+@bot.tree.command(name="start", description="Start tracking token purchases and transfers")
+async def start(interaction: discord.Interaction):
+    """Start tracking a token by opening a setup form"""
+    modal = TokenSetupModal()
+    await interaction.response.send_modal(modal)
+
+@bot.tree.command(name="help")
+async def help_command(interaction: discord.Interaction):
+    """Display help information about the bot's commands"""
+    embed = discord.Embed(
+        title="🐾 PUP Bot Help",
+        description="Track Cardano token transactions with real-time notifications!",
+        color=discord.Color.blue()
+    )
+
+    # Commands section
+    embed.add_field(
+        name="📝 Commands",
+        value=(
+            "**`/start`**\n"
+            "Start tracking a token's transactions\n\n"
+            "**`/status`**\n"
+            "View currently tracked tokens and their settings\n\n"
+            "**`/help`**\n"
+            "Show this help message"
+        ),
+        inline=False
+    )
+
+    # Features section
+    embed.add_field(
+        name="🔍 Monitoring Features",
+        value=(
+            "• DEX Trade Detection\n"
+            "• Wallet Transfer Tracking\n"
+            "• Real-time Notifications\n"
+            "• Customizable Thresholds"
+        ),
+        inline=True
+    )
+
+    # Notification Details
+    embed.add_field(
+        name="🔔 Notifications Include",
+        value=(
+            "• Trade Amount (ADA)\n"
+            "• Token Quantity\n"
+            "• Wallet Addresses\n"
+            "• Transaction Links"
+        ),
+        inline=True
+    )
+
+    # Footer
+    embed.set_footer(text="Need more help? Contact the bot administrator.")
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="status")
+async def status_command(interaction: discord.Interaction):
+    """Display status of currently tracked tokens"""
     try:
-        if policy_id not in active_trackers:
-            raise ValueError("This token is not being tracked")
-            
-        tracker = active_trackers[policy_id]
-        
+        if not active_trackers:
+            embed = discord.Embed(
+                title="📊 Token Tracking Status",
+                description="No tokens are currently being tracked in this channel.",
+                color=discord.Color.light_grey()
+            )
+            await interaction.response.send_message(embed=embed)
+            return
+
         embed = discord.Embed(
-            title="📊 24-Hour Trading Statistics",
-            description=f"Trading activity for the last 24 hours",
+            title="📊 Token Tracking Status",
+            description="Here are all the tokens currently being tracked in this channel:",
             color=discord.Color.blue()
         )
-        
-        embed.add_field(
-            name="💰 Total Volume",
-            value=f"```{tracker.total_volume_24h:,.2f} ADA```",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="🔄 Total Transactions",
-            value=f"```{tracker.transactions_24h:,}```",
-            inline=True
-        )
-        
-        if tracker.transactions_24h > 0:
-            avg_transaction = tracker.total_volume_24h / tracker.transactions_24h
+
+        for policy_id, tracker in active_trackers.items():
+            # Only show trackers for this channel
+            if tracker.channel_id != interaction.channel_id:
+                continue
+
+            token_name = tracker.token_info.get('name', 'Unknown Token') if tracker.token_info else 'Unknown Token'
+            
+            # Add field for each token
             embed.add_field(
-                name="📈 Average Transaction",
-                value=f"```{avg_transaction:,.2f} ADA```",
-                inline=True
+                name=f"🪙 {token_name}",
+                value=(
+                    f"**Policy ID:** `{policy_id}`\n"
+                    f"**Threshold:** `{tracker.threshold:,.2f} ADA`\n"
+                    f"**Transfer Notifications:** {'Enabled' if tracker.track_transfers else 'Disabled'}\n"
+                    f"**Last Block:** `{tracker.last_block or 'Not started'}`"
+                ),
+                inline=False
             )
+
+            # Set thumbnail to the first token's image
+            if tracker.image_url and not embed.thumbnail:
+                embed.set_thumbnail(url=tracker.image_url)
+
+        # Add footer with timestamp
+        embed.set_footer(text=f"Last updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        embed.timestamp = discord.utils.utcnow()
-        embed.set_footer(text="Statistics as of")
-        embed.set_thumbnail(url=tracker.image_url)
-        
-        await interaction.response.send_message(embed=embed)
-        
+        # Create view with refresh button
+        class StatusView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=None)
+
+            @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.primary, custom_id="refresh_status")
+            async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+                # Call status command again
+                await status_command(interaction)
+                # Delete the old message
+                await interaction.message.delete()
+
+        await interaction.response.send_message(embed=embed, view=StatusView())
+
     except Exception as e:
-        logger.error(f"Error fetching volume statistics: {str(e)}", exc_info=True)
-        error_embed = discord.Embed(
-            title="❌ Error Fetching Volume Statistics",
-            description=f"```{str(e)}```",
+        logger.error(f"Error in status command: {str(e)}", exc_info=True)
+        embed = discord.Embed(
+            title="❌ Error",
+            description="Failed to fetch token tracking status. Please try again.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
 
 @tasks.loop(seconds=60)
 async def check_transactions():
