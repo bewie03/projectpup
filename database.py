@@ -162,10 +162,16 @@ class Database:
             if existing:
                 # Update existing tracker
                 for key, value in tracker_data.items():
+                    # Ensure last_block is never None
+                    if key == 'last_block' and value is None:
+                        value = 0
                     setattr(existing, key, value)
                 tracker = existing
             else:
                 # Create new tracker
+                # Ensure last_block is never None
+                if 'last_block' not in tracker_data or tracker_data['last_block'] is None:
+                    tracker_data['last_block'] = 0
                 tracker = TokenTracker(**tracker_data)
                 session.add(tracker)
             
@@ -187,7 +193,8 @@ class Database:
                 channel_id=channel_id
             ).first()
             if tracker:
-                tracker.last_block = block_height
+                # Ensure block_height is never None
+                tracker.last_block = block_height if block_height is not None else 0
                 session.commit()
                 return True
             return False
