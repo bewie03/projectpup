@@ -591,8 +591,24 @@ def analyze_transaction_improved(tx_details, policy_id):
         # Calculate net amounts
         ada_amount = abs(ada_out - ada_in)
         
-        # Always use the absolute difference between in and out amounts
-        raw_token_amount = abs(token_out - token_in)
+        # For wallet transfers, use the largest output amount
+        # For buys/sells, use the difference between in and out
+        if token_in > 0 and token_out > 0:
+            # Find the largest single output amount
+            max_output = 0
+            for out in outputs:
+                for amount in out.get('amount', []):
+                    unit = amount.get('unit', '')
+                    if unit == full_asset_name or unit.startswith(policy_id):
+                        output_amount = int(amount['quantity'])
+                        max_output = max(max_output, output_amount)
+            
+            raw_token_amount = max_output
+            logger.info(f"Wallet transfer - using largest output amount: {raw_token_amount}")
+        else:
+            # Buy/Sell - use the difference
+            raw_token_amount = abs(token_out - token_in)
+            logger.info(f"Buy/Sell - using difference: {raw_token_amount}")
         
         # Only apply decimal conversion if decimals > 0
         # For tokens with 0 decimals, use the raw amount
