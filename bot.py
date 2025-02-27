@@ -76,6 +76,8 @@ app.add_middleware(
 # Initialize Discord bot with necessary intents
 intents = discord.Intents.default()
 intents.message_content = True
+intents.guilds = True  # Required to access guild information
+intents.guild_messages = True  # Required to send messages in guilds
 bot = commands.Bot(command_prefix='/', intents=intents)
 
 # Initialize Blockfrost API
