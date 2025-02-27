@@ -332,12 +332,20 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
             logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}, skipping notification")
             return
             
+        # Make sure bot is ready before attempting channel operations
+        if not bot.is_ready():
+            logger.warning(f"Bot not ready, skipping notification for channel {tracker.channel_id}")
+            return
+            
         # Try to get the channel, if not found try to fetch it
         channel = bot.get_channel(tracker.channel_id)
         if not channel:
             try:
                 # Try to fetch the channel
                 channel = await bot.fetch_channel(tracker.channel_id)
+                if not channel:
+                    logger.error(f"Channel {tracker.channel_id} not found after fetch attempt")
+                    return
             except discord.NotFound:
                 logger.error(f"Channel {tracker.channel_id} no longer exists")
                 # Remove tracker since channel is gone
@@ -357,14 +365,20 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
             # Create trade embed
             embed = await create_trade_embed(details, tracker.policy_id, ada_amount, token_amount, tracker, details)
             if embed:
-                await channel.send(embed=embed)
-                tracker.increment_trade_notifications()
+                try:
+                    await channel.send(embed=embed)
+                    tracker.increment_trade_notifications()
+                except Exception as e:
+                    logger.error(f"Error sending trade notification to channel {tracker.channel_id}: {str(e)}")
         elif tx_type == 'wallet_transfer' and tracker.track_transfers:
             # Create transfer embed
             embed = await create_transfer_embed(details, tracker.policy_id, token_amount, tracker)
             if embed:
-                await channel.send(embed=embed)
-                tracker.increment_transfer_notifications()
+                try:
+                    await channel.send(embed=embed)
+                    tracker.increment_transfer_notifications()
+                except Exception as e:
+                    logger.error(f"Error sending transfer notification to channel {tracker.channel_id}: {str(e)}")
                 
     except Exception as e:
         logger.error(f"Error sending transaction notification: {str(e)}", exc_info=True)
@@ -611,7 +625,7 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
         # Find the main wallet address
         main_wallet = None
         if trade_type == "buy":
-            for addr in output_addresses:
+            for addr in output_addresses[:3]:
                 for amount in tx_details.get('outputs', []):
                     if amount.get('address') == addr:
                         for token in amount.get('amount', []):
@@ -619,7 +633,7 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
                                 main_wallet = addr
                                 break
         else:
-            for addr in input_addresses:
+            for addr in input_addresses[:3]:
                 for amount in tx_details.get('inputs', []):
                     if amount.get('address') == addr:
                         for token in amount.get('amount', []):
