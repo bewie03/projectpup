@@ -810,6 +810,7 @@ async def stop(interaction: discord.Interaction):
 
             @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
             async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                """Stop tracking the token"""
                 try:
                     # Remove from database
                     db.remove_all_trackers_for_channel(interaction.channel_id)
@@ -949,20 +950,9 @@ async def check_transactions():
                                     # Get transactions for each asset
                                     for asset in policy_assets:
                                         try:
-                                            # Get the asset name - try different possible attribute names
-                                            if hasattr(asset, 'asset'):
-                                                asset_name = asset.asset
-                                            elif hasattr(asset, 'name'):
-                                                asset_name = asset.name
-                                            elif hasattr(asset, 'unit'):
-                                                asset_name = asset.unit.replace(policy_id, '')
-                                            else:
-                                                # Log all available attributes
-                                                logger.warning(f"Could not find asset name in object with attributes: {vars(asset)}")
-                                                continue
+                                            # Get the asset ID - it's already the full ID (policy_id + hex name)
+                                            asset_id = asset.asset
                                             
-                                            # Construct full asset ID
-                                            asset_id = f"{policy_id}{asset_name}"
                                             logger.info(f"Processing asset: {asset_id}")
                                             
                                             page = 1
