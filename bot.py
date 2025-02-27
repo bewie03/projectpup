@@ -493,18 +493,23 @@ def analyze_transaction_improved(tx_details, policy_id):
 
         # Construct full asset name (policy_id + hex of token name)
         full_asset_name = None
-        if token_info and 'asset_name' in token_info:
-            full_asset_name = f"{policy_id}{token_info['asset_name']}"
+        if token_info and 'name' in token_info:
+            # The asset name from token_info is already hex-encoded
+            full_asset_name = f"{policy_id}{token_info['name']}"
             logger.info(f"Looking for full asset name: {full_asset_name}")
 
         # Check inputs
         for inp in inputs:
             for amount in inp.get('amount', []):
                 unit = amount.get('unit', '')
+                # Debug log the unit we're checking
+                logger.debug(f"Checking input unit: {unit}")
+                
+                # Compare with full asset name or policy ID
                 if unit == full_asset_name or (not full_asset_name and policy_id in unit):
                     raw_amount = int(amount['quantity'])
                     token_in += raw_amount
-                    logger.debug(f"Found {raw_amount} tokens in input with unit {unit}")
+                    logger.info(f"Found {raw_amount} tokens in input with unit {unit}")
                 elif unit == 'lovelace':
                     ada_in += int(amount['quantity'])
 
@@ -512,10 +517,14 @@ def analyze_transaction_improved(tx_details, policy_id):
         for out in outputs:
             for amount in out.get('amount', []):
                 unit = amount.get('unit', '')
+                # Debug log the unit we're checking
+                logger.debug(f"Checking output unit: {unit}")
+                
+                # Compare with full asset name or policy ID
                 if unit == full_asset_name or (not full_asset_name and policy_id in unit):
                     raw_amount = int(amount['quantity'])
                     token_out += raw_amount
-                    logger.debug(f"Found {raw_amount} tokens in output with unit {unit}")
+                    logger.info(f"Found {raw_amount} tokens in output with unit {unit}")
                 elif unit == 'lovelace':
                     ada_out += int(amount['quantity'])
 
@@ -529,7 +538,7 @@ def analyze_transaction_improved(tx_details, policy_id):
         
         # Convert token amount using decimals only if needed
         token_amount = raw_token_amount / (10 ** decimals) if decimals > 0 else raw_token_amount
-        logger.debug(f"Raw token amount: {raw_token_amount}, Decimals: {decimals}, Converted amount: {token_amount}")
+        logger.info(f"Raw token amount: {raw_token_amount}, Decimals: {decimals}, Converted amount: {token_amount}")
 
         # Store details for notification
         details = {
@@ -538,7 +547,8 @@ def analyze_transaction_improved(tx_details, policy_id):
             'token_in': token_in,
             'token_out': token_out,
             'raw_token_amount': raw_token_amount,
-            'decimals': decimals
+            'decimals': decimals,
+            'full_asset_name': full_asset_name
         }
 
         # Determine transaction type
@@ -547,9 +557,9 @@ def analyze_transaction_improved(tx_details, policy_id):
 
         # Log token movement
         if has_policy_in_input:
-            logger.debug(f"Token input: {token_in}")
+            logger.info(f"Token input: {token_in}")
         if has_policy_in_output:
-            logger.debug(f"Token output: {token_out}")
+            logger.info(f"Token output: {token_out}")
 
         # Determine transaction type
         if has_policy_in_input and has_policy_in_output:
@@ -1019,7 +1029,7 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
         f"**Image:** [View]({image_url})"
     )
     embed.add_field(
-        name="⚙️ Configuration",
+        name="Configuration\n\n",
         value=config_text,
         inline=False
     )
@@ -1028,10 +1038,9 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
     stats_text = (
         f"**Trade Notifications:** ```0```\n"
         f"**Transfer Notifications:** ```0```\n"
-        f"**Last Block:** ```None```"
     )
     embed.add_field(
-        name="📊 Statistics",
+        name="Statistics\n\n",
         value=stats_text,
         inline=False
     )
