@@ -489,26 +489,34 @@ def analyze_transaction_improved(tx_details, policy_id):
         # Get token info for decimal handling
         token_info = get_token_info(policy_id)
         decimals = token_info.get('decimals', 0) if token_info else 0
-        logger.info(f"Using {decimals} decimals for token amount calculations")
+        logger.info(f"Found {decimals} decimals for {policy_id}")
+
+        # Construct full asset name (policy_id + hex of token name)
+        full_asset_name = None
+        if token_info and 'asset_name' in token_info:
+            full_asset_name = f"{policy_id}{token_info['asset_name']}"
+            logger.info(f"Looking for full asset name: {full_asset_name}")
 
         # Check inputs
         for inp in inputs:
             for amount in inp.get('amount', []):
-                if 'unit' in amount and policy_id in amount['unit']:
+                unit = amount.get('unit', '')
+                if unit == full_asset_name or (not full_asset_name and policy_id in unit):
                     raw_amount = int(amount['quantity'])
                     token_in += raw_amount
-                    logger.debug(f"Found {raw_amount} tokens in input")
-                elif 'unit' in amount and amount['unit'] == 'lovelace':
+                    logger.debug(f"Found {raw_amount} tokens in input with unit {unit}")
+                elif unit == 'lovelace':
                     ada_in += int(amount['quantity'])
 
         # Check outputs
         for out in outputs:
             for amount in out.get('amount', []):
-                if 'unit' in amount and policy_id in amount['unit']:
+                unit = amount.get('unit', '')
+                if unit == full_asset_name or (not full_asset_name and policy_id in unit):
                     raw_amount = int(amount['quantity'])
                     token_out += raw_amount
-                    logger.debug(f"Found {raw_amount} tokens in output")
-                elif 'unit' in amount and amount['unit'] == 'lovelace':
+                    logger.debug(f"Found {raw_amount} tokens in output with unit {unit}")
+                elif unit == 'lovelace':
                     ada_out += int(amount['quantity'])
 
         # Convert lovelace to ADA
@@ -521,7 +529,7 @@ def analyze_transaction_improved(tx_details, policy_id):
         
         # Convert token amount using decimals only if needed
         token_amount = raw_token_amount / (10 ** decimals) if decimals > 0 else raw_token_amount
-        logger.debug(f"Raw token amount: {raw_token_amount}, Converted amount: {token_amount}")
+        logger.debug(f"Raw token amount: {raw_token_amount}, Decimals: {decimals}, Converted amount: {token_amount}")
 
         # Store details for notification
         details = {
