@@ -1,0 +1,6 @@
+discord.py==2.3.2
+python-dotenv==1.0.0
+blockfrost-python==0.5.3
+aiohttp==3.9.1
+asyncio==3.4.3
+typing-extensions>=4.7.1
