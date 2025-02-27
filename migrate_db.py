@@ -15,23 +15,23 @@ def migrate_database():
     
     print("Dropping existing tables...")
     cur.execute("""
-        DROP TABLE IF EXISTS token_trackers;
+        DROP TABLE IF EXISTS trackers;
     """)
     
     print("Creating tables...")
     cur.execute("""
-        CREATE TABLE token_trackers (
-            id SERIAL PRIMARY KEY,
-            policy_id VARCHAR(56) NOT NULL,
-            token_name VARCHAR(255) NOT NULL,
+        CREATE TABLE trackers (
+            policy_id VARCHAR(56),
+            channel_id BIGINT,
+            token_name VARCHAR(255),
             image_url VARCHAR(255),
             threshold FLOAT NOT NULL DEFAULT 1000,
-            channel_id BIGINT NOT NULL,
-            last_block INTEGER,
             track_transfers BOOLEAN NOT NULL DEFAULT true,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(policy_id, channel_id)
+            last_block BIGINT NOT NULL DEFAULT 0,
+            trade_notifications INTEGER NOT NULL DEFAULT 0,
+            transfer_notifications INTEGER NOT NULL DEFAULT 0,
+            token_info JSONB,
+            PRIMARY KEY (policy_id, channel_id)
         );
     """)
     

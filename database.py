@@ -18,7 +18,7 @@ class TokenTracker(Base):
     __tablename__ = 'trackers'
     
     policy_id = Column(String, primary_key=True)
-    channel_id = Column(BigInteger, nullable=False)
+    channel_id = Column(BigInteger, primary_key=True)
     token_name = Column(String)
     image_url = Column(String)
     threshold = Column(Float, default=1000.0, nullable=False)
