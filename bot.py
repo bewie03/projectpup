@@ -163,11 +163,14 @@ async def transaction_webhook(request: Request):
         
         # Parse the payload
         data = await request.json()
-        logger.info(f"Received webhook: {data}")
+        
+        # Log only essential webhook info
+        tx_count = len(data.get('payload', []))
+        logger.info(f"Received webhook with {tx_count} transaction(s)")
         
         # Validate webhook data
         if not isinstance(data, dict) or 'type' not in data or data['type'] != 'transaction':
-            logger.error(f"Invalid webhook data: {data}")
+            logger.error("Invalid webhook data format")
             return {"status": "ignored"}
             
         # Get transactions from payload
@@ -179,11 +182,17 @@ async def transaction_webhook(request: Request):
         for tx_data in transactions:
             # Get transaction details
             tx = tx_data.get('tx', {})
+            tx_hash = tx.get('hash', 'unknown')
+            
+            # Log concise transaction info
+            logger.info(f"Processing transaction: {tx_hash[:8]}...{tx_hash[-8:]}")
+            
             inputs = tx_data.get('inputs', [])
             outputs = tx_data.get('outputs', [])
             
             # Skip if missing required data
             if not tx or not inputs or not outputs:
+                logger.warning(f"Skipping transaction {tx_hash[:8]}... - Missing required data")
                 continue
                 
             # Check if any of our tracked tokens are involved
@@ -212,8 +221,14 @@ async def transaction_webhook(request: Request):
                             break
                 
                 if is_involved:
+                    # Log token involvement
+                    logger.info(f"Found tracked token {tracker.token_name} ({tracker.policy_id[:8]}...) in transaction")
+                    
                     # Analyze the transaction
                     tx_type, ada_amount, token_amount, details = analyze_transaction_improved(tx_data, tracker.policy_id)
+                    
+                    # Log analysis results
+                    logger.info(f"Analysis: {tx_type}, ADA: {ada_amount:.2f}, Tokens: {token_amount:,}")
                     
                     # Send notification
                     await send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details)
