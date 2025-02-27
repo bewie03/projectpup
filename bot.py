@@ -5,12 +5,12 @@ from discord.ext import commands, tasks
 from blockfrost import BlockFrostApi, ApiError, ApiUrls
 from dotenv import load_dotenv
 import asyncio
-from datetime import datetime, timezone
 import json
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
-from database import Database, TokenTracker as DbTokenTracker
+from datetime import datetime
+import database as db
 
 # Configure logging
 def setup_logging():
@@ -63,7 +63,7 @@ logger = setup_logging()
 load_dotenv()
 
 # Initialize database connection
-db = Database(os.getenv('DATABASE_URL'))
+db = db.Database(os.getenv('DATABASE_URL'))
 
 # Initialize Discord bot with necessary intents
 intents = discord.Intents.default()
@@ -388,7 +388,7 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
         )
 
         # Add footer with timestamp
-        embed.set_footer(text=f"Transaction detected at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        embed.set_footer(text=f"Transaction detected at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         return embed
 
@@ -668,7 +668,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             )
             
             # Add footer with timestamp
-            embed.set_footer(text=f"Started tracking at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            embed.set_footer(text=f"Started tracking at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
             # Create view with buttons
             view = TokenControls(policy_id)
@@ -803,7 +803,7 @@ async def status_command(interaction: discord.Interaction):
                 embed.set_thumbnail(url=tracker.image_url)
 
         # Add footer with timestamp
-        embed.set_footer(text=f"Last updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        embed.set_footer(text=f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Create view with refresh button
         class StatusView(discord.ui.View):
@@ -910,9 +910,9 @@ async def check_transactions():
             except Exception as tracker_e:
                 logger.error(f"Error processing tracker {policy_id}: {str(tracker_e)}", exc_info=True)
                 continue
-
+                
     except Exception as e:
-        logger.error(f"Error in check_transactions task: {str(e)}", exc_info=True)
+        logger.error(f"Error in check_transactions: {str(e)}", exc_info=True)
 
 @bot.event
 async def on_ready():
