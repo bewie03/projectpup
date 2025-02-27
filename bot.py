@@ -85,6 +85,8 @@ class TokenTracker:
         self.total_volume_24h = 0
         self.transactions_24h = 0
         self.track_transfers = True
+        self.trade_notifications = 0  # Counter for trade notifications
+        self.transfer_notifications = 0  # Counter for transfer notifications
         logger.info(f"Created new TokenTracker for {token_name} (policy_id: {policy_id})")
         
         # Save to database
@@ -794,7 +796,8 @@ async def status_command(interaction: discord.Interaction):
                     f"Policy ID: `{policy_id}`\n"
                     f"Threshold: `{tracker.threshold:,.2f}`\n"
                     f"Transfers: `{'On' if tracker.track_transfers else 'Off'}`\n"
-                    f"Block: `{tracker.last_block or 'Not started'}`"
+                    f"Trade Alerts: `{tracker.trade_notifications}`\n"
+                    f"Transfer Alerts: `{tracker.transfer_notifications}`"
                 ),
                 inline=False
             )
@@ -865,7 +868,7 @@ async def check_transactions():
                     continue
 
                 # Get transactions since last check using the correct endpoint
-                transactions = api.assets_policy_by_id_txs(policy_id, from_block=tracker.last_block)
+                transactions = api.assets_transactions_by_policy(policy_id, from_block=tracker.last_block)
                 if isinstance(transactions, Exception):
                     raise transactions
                 logger.info(f"Found {len(transactions)} new transactions for {policy_id}")
@@ -888,6 +891,7 @@ async def check_transactions():
                                 channel = bot.get_channel(tracker.channel_id)
                                 if channel:
                                     await channel.send(embed=embed)
+                                    tracker.trade_notifications += 1
                                     
                         # For transfers, check token amount
                         elif tx_type == 'wallet_transfer' and tracker.track_transfers and token_amount >= tracker.threshold:
@@ -899,6 +903,7 @@ async def check_transactions():
                                 channel = bot.get_channel(tracker.channel_id)
                                 if channel:
                                     await channel.send(embed=transfer_embed)
+                                    tracker.transfer_notifications += 1
                     
                     except Exception as tx_e:
                         logger.error(f"Error processing transaction {tx.tx_hash}: {str(tx_e)}", exc_info=True)
