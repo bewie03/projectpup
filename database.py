@@ -1,6 +1,6 @@
 import os
 import logging
-from sqlalchemy import create_engine, Column, String, Integer, Float, Boolean, DateTime
+from sqlalchemy import create_engine, Column, String, Integer, Float, Boolean, DateTime, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
@@ -18,9 +18,10 @@ class TokenTracker(Base):
 
     id = Column(Integer, primary_key=True)
     policy_id = Column(String, nullable=False)
+    token_name = Column(String, nullable=False)
     image_url = Column(String)
     threshold = Column(Float, nullable=False)
-    channel_id = Column(Integer, nullable=False)
+    channel_id = Column(BigInteger, nullable=False)
     last_block = Column(Integer)
     track_transfers = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -30,6 +31,7 @@ class TokenTracker(Base):
         """Convert model to dictionary for TokenTracker class"""
         return {
             'policy_id': self.policy_id,
+            'token_name': self.token_name,
             'image_url': self.image_url,
             'threshold': self.threshold,
             'channel_id': self.channel_id,
