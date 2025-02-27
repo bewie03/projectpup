@@ -255,13 +255,19 @@ async def on_ready():
 active_trackers = {}
 
 class TokenTracker:
-    def __init__(self, policy_id: str, channel_id: int, last_block: int = None):
+    def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
+                 image_url: str = None, threshold: float = 1000.0, 
+                 track_transfers: bool = True, last_block: int = None):
         self.policy_id = policy_id
         self.channel_id = channel_id
+        self.token_name = token_name
+        self.image_url = image_url
+        self.threshold = threshold
+        self.track_transfers = track_transfers
         self.last_block = last_block
         
     def __str__(self):
-        return f"TokenTracker(policy_id={self.policy_id}, channel_id={self.channel_id}, last_block={self.last_block})"
+        return f"TokenTracker(policy_id={self.policy_id}, token_name={self.token_name}, channel_id={self.channel_id})"
 
 async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
     """Send a notification about a transaction to the appropriate Discord channel"""
@@ -773,9 +779,9 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 token_name=token_name,
                 image_url=image_url,
                 threshold=threshold,
-                channel_id=interaction.channel_id
+                channel_id=interaction.channel_id,
+                track_transfers=track_transfers
             )
-            tracker.track_transfers = track_transfers
             
             # Create success embed
             embed = discord.Embed(
