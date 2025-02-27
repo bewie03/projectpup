@@ -43,5 +43,34 @@ def inspect_database():
     cur.close()
     conn.close()
 
+def add_notification_columns():
+    DATABASE_URL = "postgres://uf96h0a7396t3j:p98406daed2890173604432daf725ecedc22819e058d1019c79681d6c84a65501@cd27da2sn4hj7h.cluster-czrs8kj4isg7.us-east-1.rds.amazonaws.com:5432/dbu70voivfu6u8"
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+
+    try:
+        # Add trade_notifications column
+        cur.execute("""
+            ALTER TABLE token_trackers
+            ADD COLUMN IF NOT EXISTS trade_notifications INTEGER DEFAULT 0;
+        """)
+
+        # Add transfer_notifications column
+        cur.execute("""
+            ALTER TABLE token_trackers
+            ADD COLUMN IF NOT EXISTS transfer_notifications INTEGER DEFAULT 0;
+        """)
+
+        conn.commit()
+        print("Successfully added notification columns")
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Error: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
+
 if __name__ == "__main__":
-    inspect_database()
+    add_notification_columns()
+    inspect_database()  # Show the updated schema

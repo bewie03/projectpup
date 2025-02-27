@@ -24,6 +24,8 @@ class TokenTracker(Base):
     channel_id = Column(BigInteger, nullable=False)
     last_block = Column(Integer)
     track_transfers = Column(Boolean, default=True)
+    trade_notifications = Column(Integer, default=0)
+    transfer_notifications = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -36,7 +38,9 @@ class TokenTracker(Base):
             'threshold': self.threshold,
             'channel_id': self.channel_id,
             'last_block': self.last_block,
-            'track_transfers': self.track_transfers
+            'track_transfers': self.track_transfers,
+            'trade_notifications': self.trade_notifications,
+            'transfer_notifications': self.transfer_notifications
         }
 
 class Database:
@@ -139,5 +143,29 @@ class Database:
             session.rollback()
             logger.error(f"Database error while deleting token tracker: {str(e)}", exc_info=True)
             return False
+        finally:
+            session.close()
+
+    def update_notification_counts(self, policy_id, channel_id, trade_count, transfer_count):
+        """Update notification counts for a token tracker"""
+        session = self.Session()
+        try:
+            tracker = session.query(TokenTracker).filter_by(
+                policy_id=policy_id,
+                channel_id=channel_id
+            ).first()
+
+            if tracker:
+                tracker.trade_notifications = trade_count
+                tracker.transfer_notifications = transfer_count
+                session.commit()
+                logger.info(f"Updated notification counts for policy_id: {policy_id}")
+                return True
+            return False
+
+        except SQLAlchemyError as e:
+            session.rollback()
+            logger.error(f"Database error while updating notification counts: {str(e)}", exc_info=True)
+            raise
         finally:
             session.close()

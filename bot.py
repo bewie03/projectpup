@@ -74,20 +74,16 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 active_trackers = {}
 
 class TokenTracker:
-    def __init__(self, policy_id, token_name, image_url, threshold, channel_id):
+    def __init__(self, policy_id, token_name, image_url, threshold, channel_id, last_block=None, track_transfers=True, trade_notifications=0, transfer_notifications=0):
         self.policy_id = policy_id
         self.token_name = token_name
         self.image_url = image_url
-        self.threshold = threshold  # Used for both trades and transfers
+        self.threshold = threshold
         self.channel_id = channel_id
-        self.last_block = None
-        self.token_info = None
-        self.total_volume_24h = 0
-        self.transactions_24h = 0
-        self.track_transfers = True
-        self.trade_notifications = 0  # Counter for trade notifications
-        self.transfer_notifications = 0  # Counter for transfer notifications
-        logger.info(f"Created new TokenTracker for {token_name} (policy_id: {policy_id})")
+        self.last_block = last_block
+        self.track_transfers = track_transfers
+        self.trade_notifications = trade_notifications
+        self.transfer_notifications = transfer_notifications
         
         # Save to database
         try:
@@ -97,11 +93,23 @@ class TokenTracker:
                 'image_url': image_url,
                 'threshold': threshold,
                 'channel_id': channel_id,
-                'last_block': None,
-                'track_transfers': True
+                'last_block': last_block,
+                'track_transfers': track_transfers,
+                'trade_notifications': trade_notifications,
+                'transfer_notifications': transfer_notifications
             })
         except Exception as e:
             logger.error(f"Failed to save token tracker to database: {str(e)}", exc_info=True)
+        
+        logger.info(f"Created new TokenTracker for {token_name} (policy_id: {policy_id})")
+        
+    def increment_trade_notifications(self):
+        self.trade_notifications += 1
+        db.update_notification_counts(self.policy_id, self.channel_id, self.trade_notifications, self.transfer_notifications)
+
+    def increment_transfer_notifications(self):
+        self.transfer_notifications += 1
+        db.update_notification_counts(self.policy_id, self.channel_id, self.trade_notifications, self.transfer_notifications)
 
 async def get_token_info(api: BlockFrostApi, policy_id: str):
     try:
@@ -899,7 +907,7 @@ async def check_transactions():
                     continue
 
                 # Get transactions since last check using the correct endpoint
-                transactions = api.asset_policy_transactions(policy_id, from_block=tracker.last_block)
+                transactions = api.assets_policy_by_id_txs(policy_id, from_block=tracker.last_block)
                 if isinstance(transactions, Exception):
                     raise transactions
                 logger.info(f"Found {len(transactions)} new transactions for {policy_id}")
@@ -922,7 +930,7 @@ async def check_transactions():
                                 channel = bot.get_channel(tracker.channel_id)
                                 if channel:
                                     await channel.send(embed=embed)
-                                    tracker.trade_notifications += 1
+                                    tracker.increment_trade_notifications()
                                     
                         # For transfers, check token amount
                         elif tx_type == 'wallet_transfer' and tracker.track_transfers and token_amount >= tracker.threshold:
@@ -934,7 +942,7 @@ async def check_transactions():
                                 channel = bot.get_channel(tracker.channel_id)
                                 if channel:
                                     await channel.send(embed=transfer_embed)
-                                    tracker.transfer_notifications += 1
+                                    tracker.increment_transfer_notifications()
                     
                     except Exception as tx_e:
                         logger.error(f"Error processing transaction {tx.tx_hash}: {str(tx_e)}", exc_info=True)
@@ -973,10 +981,12 @@ async def on_ready():
                 token_name=tracker_data['token_name'],
                 image_url=tracker_data.get('image_url'),
                 threshold=tracker_data['threshold'],
-                channel_id=tracker_data['channel_id']
+                channel_id=tracker_data['channel_id'],
+                last_block=tracker_data.get('last_block'),
+                track_transfers=tracker_data.get('track_transfers', True),
+                trade_notifications=tracker_data.get('trade_notifications', 0),
+                transfer_notifications=tracker_data.get('transfer_notifications', 0)
             )
-            tracker.last_block = tracker_data.get('last_block')
-            tracker.track_transfers = tracker_data.get('track_transfers', True)
             active_trackers[tracker.policy_id] = tracker
             logger.info(f"Loaded tracker from database: {tracker_data['policy_id']}")
     except Exception as e:
