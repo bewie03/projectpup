@@ -98,5 +98,5 @@ def check_database():
     conn.close()
 
 if __name__ == "__main__":
-    migrate_database()
+    # migrate_database()  # Comment out migration
     check_database()

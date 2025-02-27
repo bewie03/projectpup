@@ -193,15 +193,26 @@ async def transaction_webhook(request: Request):
                 logger.warning(f"Skipping transaction {tx_hash} - Missing required data")
                 continue
                 
-            # Check if any of our tracked tokens are involved
+            # Get all trackers and check each transaction against them
             trackers = database.get_trackers()
-            logger.info(f"Checking {len(trackers)} tracked tokens")
+            logger.info(f"Checking transaction against {len(trackers)} tracked tokens")
             
             for tracker in trackers:
-                # Check inputs and outputs for our policy ID
+                # Create composite key
+                tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
+                
+                # Skip if tracker not in memory (shouldn't happen)
+                if tracker_key not in active_trackers:
+                    logger.warning(f"Tracker {tracker_key} not found in memory, skipping")
+                    continue
+                    
+                # Get active tracker from memory
+                active_tracker = active_trackers[tracker_key]
+                
+                # Check if any of our tracked tokens are involved
                 is_involved = False
                 
-                # Check inputs
+                # Check inputs and outputs for our policy ID
                 input_addresses = []
                 for inp in inputs:
                     input_addresses.append(inp.get('address', ''))
@@ -213,7 +224,7 @@ async def transaction_webhook(request: Request):
                         # Only check policy ID in webhook handler
                         if unit.startswith(tracker.policy_id):
                             is_involved = True
-                            logger.info(f"Found token {tracker.token_name} in transaction inputs")
+                            logger.info(f"Found token {active_tracker.token_name} in transaction inputs")
                             break
                     if is_involved:
                         break
@@ -231,14 +242,14 @@ async def transaction_webhook(request: Request):
                             # Only check policy ID in webhook handler
                             if unit.startswith(tracker.policy_id):
                                 is_involved = True
-                                logger.info(f"Found token {tracker.token_name} in transaction outputs")
+                                logger.info(f"Found token {active_tracker.token_name} in transaction outputs")
                                 break
                         if is_involved:
                             break
                 
                 if is_involved:
                     # Log token involvement
-                    logger.info(f"Analyzing transaction for {tracker.token_name} ({tracker.policy_id})")
+                    logger.info(f"Analyzing transaction for {active_tracker.token_name} ({active_tracker.policy_id})")
                     
                     # Create transaction data structure for analysis
                     analysis_data = {
@@ -248,7 +259,7 @@ async def transaction_webhook(request: Request):
                     }
                     
                     # Analyze the transaction
-                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, tracker.policy_id)
+                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, active_tracker.policy_id)
                     
                     # Add transaction hash to details
                     details['hash'] = tx_hash
@@ -257,9 +268,9 @@ async def transaction_webhook(request: Request):
                     logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
                     
                     # Send notification
-                    await send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details)
+                    await send_transaction_notification(active_tracker, tx_type, ada_amount, token_amount, details)
                 else:
-                    logger.debug(f"Token {tracker.token_name} not involved in transaction {tx_hash}")
+                    logger.debug(f"Token {active_tracker.token_name} not involved in transaction {tx_hash}")
         
         return {"status": "ok"}
         
@@ -281,8 +292,11 @@ async def on_ready():
         
         for tracker in trackers:
             try:
+                # Create composite key from policy_id and channel_id
+                tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
+                
                 # Convert database model to TokenTracker object
-                active_trackers[tracker.policy_id] = TokenTracker(
+                active_trackers[tracker_key] = TokenTracker(
                     policy_id=tracker.policy_id,
                     channel_id=int(tracker.channel_id),  # Ensure it's an int
                     token_name=tracker.token_name,
@@ -375,8 +389,9 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         if not channel:
             logger.error(f"Channel {tracker.channel_id} not found in any guild")
             # Remove tracker since channel is not accessible
-            if tracker.policy_id in active_trackers:
-                del active_trackers[tracker.policy_id]
+            tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
+            if tracker_key in active_trackers:
+                del active_trackers[tracker_key]
             database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
             return
             
@@ -851,12 +866,13 @@ class TokenControls(discord.ui.View):
     @discord.ui.button(label="Stop Tracking", style=discord.ButtonStyle.danger, emoji="⛔")
     async def stop_tracking(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            if self.policy_id in active_trackers:
+            tracker_key = f"{self.policy_id}:{interaction.channel_id}"
+            if tracker_key in active_trackers:
                 # Remove from database
                 database.delete_token_tracker(self.policy_id, interaction.channel_id)
                 
                 # Remove from active trackers
-                del active_trackers[self.policy_id]
+                del active_trackers[tracker_key]
             
                 # Update message
                 embed = discord.Embed(
@@ -882,7 +898,8 @@ class TokenControls(discord.ui.View):
     async def toggle_transfers(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             # Get the tracker
-            tracker = active_trackers.get(self.policy_id)
+            tracker_key = f"{self.policy_id}:{interaction.channel_id}"
+            tracker = active_trackers.get(tracker_key)
             if not tracker:
                 await interaction.response.send_message("❌ Token tracker not found.", ephemeral=True)
                 return
@@ -1100,7 +1117,8 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             await interaction.response.send_message(embed=embed, view=view)
             
             # Save to memory and database
-            active_trackers[tracker.policy_id] = tracker
+            tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
+            active_trackers[tracker_key] = tracker
             
             logger.info(f"Started tracking token: {tracker.token_name} ({tracker.policy_id})")
                 
