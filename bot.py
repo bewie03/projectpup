@@ -285,20 +285,18 @@ active_trackers = {}
 
 class TokenTracker:
     def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
-                     image_url: str = None, threshold: float = 1000.0, 
-                     track_transfers: bool = True, last_block: int = None,
-                     trade_notifications: int = 0, transfer_notifications: int = 0,
-                     decimals: int = 0):
-            self.policy_id = policy_id
-            self.channel_id = channel_id
-            self.token_name = token_name
-            self.image_url = image_url
-            self.threshold = threshold
-            self.track_transfers = track_transfers
-            self.last_block = last_block
-            self.trade_notifications = trade_notifications
-            self.transfer_notifications = transfer_notifications
-            self.decimals = decimals  # Number of decimal places for the token
+                 image_url: str = None, threshold: float = 1000.0, 
+                 track_transfers: bool = True, last_block: int = None,
+                 trade_notifications: int = 0, transfer_notifications: int = 0):
+        self.policy_id = policy_id
+        self.channel_id = channel_id
+        self.token_name = token_name
+        self.image_url = image_url
+        self.threshold = threshold
+        self.track_transfers = track_transfers
+        self.last_block = last_block
+        self.trade_notifications = trade_notifications
+        self.transfer_notifications = transfer_notifications
         
     def __str__(self):
         return f"TokenTracker(policy_id={self.policy_id}, token_name={self.token_name}, channel_id={self.channel_id})"
@@ -393,23 +391,13 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
     except Exception as e:
         logger.error(f"Error sending notification: {str(e)}", exc_info=True)
 
-async def get_token_info(api: BlockFrostApi, policy_id: str):
+def get_token_info(api: BlockFrostApi, policy_id: str):
     try:
         # Get all assets under this policy
         assets = api.assets_policy(policy_id)
         if isinstance(assets, Exception):
             raise assets
-            
-        # Get detailed info about the first asset
-        if assets:
-            asset = api.asset(assets[0].asset)
-            if isinstance(asset, Exception):
-                raise asset
-            return {
-                'name': asset.onchain_metadata.get('name', 'Unknown Token'),
-                'decimals': asset.onchain_metadata.get('decimals', 0)
-            }
-        return None
+        return assets[0] if assets else None
     except Exception as e:
         logger.error(f"Error getting token info: {str(e)}", exc_info=True)
         return None
@@ -487,18 +475,17 @@ def analyze_transaction_improved(tx_details, policy_id):
         ada_amount = abs(ada_out - ada_in)
         token_amount = abs(token_out - token_in)
 
+        # Determine transaction type
+        has_policy_in_input = token_in > 0
+        has_policy_in_output = token_out > 0
+
         # Store details for notification
         details = {
             'ada_in': ada_in,
             'ada_out': ada_out,
             'token_in': token_in,
-            'token_out': token_out,
-            'raw_token_amount': token_amount  # Store raw amount before decimal adjustment
+            'token_out': token_out
         }
-
-        # Determine transaction type
-        has_policy_in_input = token_in > 0
-        has_policy_in_output = token_out > 0
 
         # Determine transaction type
         if has_policy_in_input and has_policy_in_output:
@@ -812,20 +799,12 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             required=False,
             default="yes"
         )
-        self.decimals = discord.ui.TextInput(
-            label="Token Decimals",
-            placeholder="Enter the token's decimal places (default: 0)",
-            style=discord.TextStyle.short,
-            required=False,
-            default="0"
-        )
         
         self.add_item(self.policy_id)
         self.add_item(self.token_name)
         self.add_item(self.image_url)
         self.add_item(self.threshold)
         self.add_item(self.track_transfers)
-        self.add_item(self.decimals)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -859,20 +838,6 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             # Parse track_transfers
             track_transfers = self.track_transfers.value.lower() != "no"
 
-            # Parse decimals
-            try:
-                decimals = int(self.decimals.value or "0")
-                if decimals < 0:
-                    raise ValueError("Decimals must be non-negative")
-            except ValueError:
-                error_embed = discord.Embed(
-                    title="❌ Invalid Decimals",
-                    description="Please enter a valid non-negative integer for the decimals.",
-                    color=discord.Color.red()
-                )
-                await message.edit(embed=error_embed)
-                return
-
             # Check if already tracking and remove if exists
             if policy_id in active_trackers:
                 # Remove from memory
@@ -891,8 +856,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 image_url=image_url,
                 threshold=threshold,
                 channel_id=interaction.channel_id,
-                track_transfers=track_transfers,
-                decimals=decimals
+                track_transfers=track_transfers
             )
             
             # Create success embed
@@ -917,8 +881,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                     f"**Threshold:** `{threshold:,.2f} Tokens`\n"
                     f"**Channel:** {interaction.channel.mention}\n"
                     f"**Transfer Notifications:** {'Enabled' if track_transfers else 'Disabled'}\n"
-                    f"**Image URL:** {tracker.image_url or 'None'}\n"
-                    f"**Decimals:** `{decimals}`"
+                    f"**Image URL:** {tracker.image_url or 'None'}"
                 ),
                 inline=False
             )
@@ -966,8 +929,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                     'threshold': threshold,
                     'channel_id': interaction.channel_id,
                     'last_block': None,
-                    'track_transfers': track_transfers,
-                    'decimals': decimals
+                    'track_transfers': track_transfers
                 })
             except Exception as e:
                 logger.error(f"Failed to save token tracker to database: {str(e)}", exc_info=True)
@@ -1067,8 +1029,7 @@ async def status(interaction: discord.Interaction):
                     f"Threshold: `{tracker.threshold:,.2f}`\n"
                     f"Transfers: `{'On' if tracker.track_transfers else 'Off'}`\n"
                     f"Trade Alerts: `{tracker.trade_notifications}`\n"
-                    f"Transfer Alerts: `{tracker.transfer_notifications}`\n"
-                    f"Decimals: `{tracker.decimals}`"
+                    f"Transfer Alerts: `{tracker.transfer_notifications}`"
                 ),
                 inline=False
             )
