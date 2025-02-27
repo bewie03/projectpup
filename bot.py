@@ -332,33 +332,23 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
             logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}, skipping notification")
             return
             
-        # Make sure bot is ready before attempting channel operations
-        if not bot.is_ready():
-            logger.warning(f"Bot not ready, skipping notification for channel {tracker.channel_id}")
-            return
-            
-        # Try to get the channel, if not found try to fetch it
+        # Try to get the channel from cache first
         channel = bot.get_channel(tracker.channel_id)
+        
+        # If not in cache, try to find it in guilds
         if not channel:
-            try:
-                # Try to fetch the channel
-                channel = await bot.fetch_channel(tracker.channel_id)
-                if not channel:
-                    logger.error(f"Channel {tracker.channel_id} not found after fetch attempt")
-                    return
-            except discord.NotFound:
-                logger.error(f"Channel {tracker.channel_id} no longer exists")
-                # Remove tracker since channel is gone
-                if tracker.policy_id in active_trackers:
-                    del active_trackers[tracker.policy_id]
-                database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
-                return
-            except discord.Forbidden:
-                logger.error(f"Bot does not have access to channel {tracker.channel_id}")
-                return
-            except Exception as e:
-                logger.error(f"Error fetching channel {tracker.channel_id}: {str(e)}")
-                return
+            for guild in bot.guilds:
+                channel = guild.get_channel(tracker.channel_id)
+                if channel:
+                    break
+                    
+        if not channel:
+            logger.error(f"Channel {tracker.channel_id} not found in any guild")
+            # Remove tracker since channel is not accessible
+            if tracker.policy_id in active_trackers:
+                del active_trackers[tracker.policy_id]
+            database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
+            return
             
         # Create appropriate embed based on transaction type
         if tx_type in ['buy', 'sell']:
@@ -368,6 +358,8 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                 try:
                     await channel.send(embed=embed)
                     tracker.increment_trade_notifications()
+                except discord.Forbidden:
+                    logger.error(f"Bot does not have permission to send messages in channel {tracker.channel_id}")
                 except Exception as e:
                     logger.error(f"Error sending trade notification to channel {tracker.channel_id}: {str(e)}")
         elif tx_type == 'wallet_transfer' and tracker.track_transfers:
@@ -377,6 +369,8 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                 try:
                     await channel.send(embed=embed)
                     tracker.increment_transfer_notifications()
+                except discord.Forbidden:
+                    logger.error(f"Bot does not have permission to send messages in channel {tracker.channel_id}")
                 except Exception as e:
                     logger.error(f"Error sending transfer notification to channel {tracker.channel_id}: {str(e)}")
                 
