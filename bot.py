@@ -519,8 +519,8 @@ def analyze_transaction_improved(tx_details, policy_id):
         ada_amount = abs(ada_out - ada_in)
         raw_token_amount = abs(token_out - token_in)
         
-        # Convert token amount using decimals
-        token_amount = raw_token_amount / (10 ** decimals)
+        # Convert token amount using decimals only if needed
+        token_amount = raw_token_amount / (10 ** decimals) if decimals > 0 else raw_token_amount
         logger.debug(f"Raw token amount: {raw_token_amount}, Converted amount: {token_amount}")
 
         # Store details for notification
