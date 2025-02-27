@@ -420,8 +420,22 @@ def get_token_info(policy_id: str):
         if isinstance(metadata, Exception):
             raise metadata
             
+        # Convert Namespace objects to dictionaries
+        def namespace_to_dict(obj):
+            if hasattr(obj, '__dict__'):
+                return {k: namespace_to_dict(v) for k, v in vars(obj).items()}
+            elif isinstance(obj, (list, tuple)):
+                return [namespace_to_dict(x) for x in obj]
+            elif isinstance(obj, dict):
+                return {k: namespace_to_dict(v) for k, v in obj.items()}
+            else:
+                return obj
+                
+        # Convert metadata to dictionary
+        metadata_dict = namespace_to_dict(metadata)
+        
         # Get onchain metadata if available
-        onchain_metadata = metadata.onchain_metadata if hasattr(metadata, 'onchain_metadata') else {}
+        onchain_metadata = metadata_dict.get('onchain_metadata', {})
         
         # Try to get decimals from various sources
         decimals = None
@@ -431,10 +445,8 @@ def get_token_info(policy_id: str):
             decimals = onchain_metadata.get('decimals')
             
         # If not found, check asset metadata
-        if decimals is None and hasattr(metadata, 'metadata'):
-            # Convert Namespace to dict if needed
-            meta_dict = vars(metadata.metadata) if hasattr(metadata.metadata, '__dict__') else {}
-            decimals = meta_dict.get('decimals')
+        if decimals is None and 'metadata' in metadata_dict:
+            decimals = metadata_dict['metadata'].get('decimals')
             
         # Default to 0 if no decimal information found
         if decimals is None:
@@ -446,7 +458,7 @@ def get_token_info(policy_id: str):
         return {
             'asset': asset.asset,
             'policy_id': policy_id,
-            'name': metadata.asset_name,
+            'name': metadata_dict.get('asset_name'),
             'decimals': int(decimals),
             'metadata': onchain_metadata
         }
