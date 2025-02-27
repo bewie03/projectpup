@@ -782,6 +782,84 @@ async def status(interaction: discord.Interaction):
         logger.error(f"Error in status command: {str(e)}", exc_info=True)
         await interaction.response.send_message("Failed to get status. Please try again.", ephemeral=True)
 
+@bot.tree.command(name="stop", description="Stop tracking all tokens in this channel")
+async def stop(interaction: discord.Interaction):
+    """Stop tracking all tokens in this channel"""
+    try:
+        # Check if there are any trackers for this channel
+        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
+        if not channel_trackers:
+            await interaction.response.send_message("No tokens are being tracked in this channel.", ephemeral=True)
+            return
+
+        # Create confirmation embed
+        embed = discord.Embed(
+            title="⚠️ Stop Token Tracking",
+            description="Are you sure you want to stop tracking all tokens in this channel?\nThis action cannot be undone.",
+            color=discord.Color.yellow()
+        )
+
+        # List tokens that will be removed
+        tokens_list = "\n".join([f"• {t.token_name} (`{t.policy_id}`)" for t in channel_trackers])
+        embed.add_field(name="Tokens to remove:", value=tokens_list, inline=False)
+
+        # Create confirmation buttons
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)  # 60 second timeout
+
+            @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                try:
+                    # Remove from database
+                    db.remove_all_trackers_for_channel(interaction.channel_id)
+
+                    # Remove from active trackers
+                    policies_to_remove = []
+                    for policy_id, tracker in active_trackers.items():
+                        if tracker.channel_id == interaction.channel_id:
+                            policies_to_remove.append(policy_id)
+                    
+                    for policy_id in policies_to_remove:
+                        del active_trackers[policy_id]
+
+                    # Disable buttons
+                    for child in self.children:
+                        child.disabled = True
+                    
+                    # Update message
+                    embed = discord.Embed(
+                        title="✅ Token Tracking Stopped",
+                        description="Successfully stopped tracking all tokens in this channel.",
+                        color=discord.Color.green()
+                    )
+                    await interaction.response.edit_message(embed=embed, view=self)
+
+                except Exception as e:
+                    logger.error(f"Error stopping token tracking: {str(e)}", exc_info=True)
+                    await interaction.response.send_message("Failed to stop token tracking. Please try again.", ephemeral=True)
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                # Disable buttons
+                for child in self.children:
+                    child.disabled = True
+                
+                # Update message
+                embed = discord.Embed(
+                    title="❌ Operation Cancelled",
+                    description="Token tracking will continue.",
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=self)
+
+        # Send confirmation message
+        await interaction.response.send_message(embed=embed, view=ConfirmView())
+
+    except Exception as e:
+        logger.error(f"Error in stop command: {str(e)}", exc_info=True)
+        await interaction.response.send_message("Failed to process stop command. Please try again.", ephemeral=True)
+
 @tasks.loop(seconds=60)
 async def check_transactions():
     try:
@@ -810,17 +888,70 @@ async def check_transactions():
 
                 # Get first asset and its hex name
                 first_asset = asset_info[0]
-                asset_name_hex = first_asset.asset_name.hex() if hasattr(first_asset, 'asset_name') else ''
+                # Get the hex asset name from the asset_name field
+                asset_name_hex = first_asset.asset_name if hasattr(first_asset, 'asset_name') else ''
                 full_asset_id = f"{policy_id}{asset_name_hex}"
+                logger.info(f"Checking transactions for asset: {full_asset_id}")
                 
-                # Get transactions since last check
-                transactions = api.asset_transactions(full_asset_id, from_block=tracker.last_block)
-                if isinstance(transactions, Exception):
-                    raise transactions
-                logger.info(f"Found {len(transactions)} new transactions for {policy_id}")
+                # Get transactions since last check with pagination
+                all_transactions = []
+                page = 1
+                while True:
+                    try:
+                        # Get transactions for current page
+                        transactions = api.asset_transactions(
+                            asset=full_asset_id,
+                            count=100,  # Max allowed per page
+                            page=page,
+                            order='desc'  # Get newest first
+                        )
+                        if isinstance(transactions, Exception):
+                            raise transactions
+                        
+                        # No more transactions
+                        if not transactions:
+                            break
+                            
+                        logger.info(f"Found {len(transactions)} transactions on page {page}")
+                        
+                        # Filter transactions based on block height if we have a last_block
+                        if tracker.last_block:
+                            transactions = [tx for tx in transactions if tx.block_height > tracker.last_block]
+                            
+                        # Add filtered transactions
+                        all_transactions.extend(transactions)
+                        
+                        # If we got less than 100 transactions, we've hit the end
+                        if len(transactions) < 100:
+                            break
+                            
+                        page += 1
+                        
+                    except Exception as tx_e:
+                        if hasattr(tx_e, 'status_code'):
+                            if tx_e.status_code == 404:
+                                logger.warning(f"Asset {full_asset_id} not found. Trying policy transactions...")
+                                # Fallback to policy transactions
+                                policy_txs = api.assets_policy_by_id_txs(policy_id)
+                                if isinstance(policy_txs, Exception):
+                                    raise policy_txs
+                                # Filter by block height if needed
+                                if tracker.last_block:
+                                    policy_txs = [tx for tx in policy_txs if tx.block_height > tracker.last_block]
+                                all_transactions = policy_txs
+                            elif tx_e.status_code == 429:
+                                logger.warning("Rate limit reached, waiting for next cycle")
+                                break
+                            else:
+                                raise tx_e
+                        else:
+                            raise tx_e
+                        break
+
+                logger.info(f"Processing {len(all_transactions)} total transactions for {policy_id}")
 
                 # Process each transaction
-                for tx in transactions:
+                for tx in all_transactions:
                     try:
                         # Get full transaction details
                         tx_details = api.transaction(tx.tx_hash)
@@ -855,14 +986,16 @@ async def check_transactions():
                         continue
 
                 # Update last block height
-                tracker.last_block = latest_block.height
-                logger.debug(f"Updated last block height for {policy_id}: {tracker.last_block}")
-                
-                # Update database with new block height
-                try:
-                    db.update_last_block(policy_id, tracker.channel_id, tracker.last_block)
-                except Exception as e:
-                    logger.error(f"Failed to update last block in database: {str(e)}", exc_info=True)
+                if all_transactions:
+                    max_block = max(tx.block_height for tx in all_transactions)
+                    tracker.last_block = max(max_block, tracker.last_block or 0)
+                    logger.debug(f"Updated last block height for {policy_id}: {tracker.last_block}")
+                    
+                    # Update database with new block height
+                    try:
+                        db.update_last_block(policy_id, tracker.channel_id, tracker.last_block)
+                    except Exception as e:
+                        logger.error(f"Failed to update last block in database: {str(e)}", exc_info=True)
                 
             except Exception as tracker_e:
                 logger.error(f"Error processing tracker {policy_id}: {str(tracker_e)}", exc_info=True)

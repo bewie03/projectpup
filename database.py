@@ -169,3 +169,21 @@ class Database:
             raise
         finally:
             session.close()
+
+    def remove_all_trackers_for_channel(self, channel_id):
+        """Remove all token trackers for a specific channel"""
+        session = self.Session()
+        try:
+            # Find and delete all trackers for this channel
+            trackers = session.query(TokenTracker).filter_by(channel_id=channel_id).all()
+            for tracker in trackers:
+                session.delete(tracker)
+            session.commit()
+            logger.info(f"Removed all trackers for channel: {channel_id}")
+            return True
+        except SQLAlchemyError as e:
+            session.rollback()
+            logger.error(f"Database error while removing trackers: {str(e)}", exc_info=True)
+            raise
+        finally:
+            session.close()
