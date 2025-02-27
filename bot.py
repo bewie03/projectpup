@@ -78,7 +78,7 @@ class TokenTracker:
         self.policy_id = policy_id
         self.token_name = token_name
         self.image_url = image_url
-        self.threshold = threshold
+        self.threshold = threshold  # Used for both trades and transfers
         self.channel_id = channel_id
         self.last_block = None
         self.token_info = None
@@ -544,8 +544,8 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             required=False
         )
         self.threshold = discord.ui.TextInput(
-            label="Minimum ADA Threshold",
-            placeholder="Enter minimum ADA amount for notifications (default: 1000)",
+            label="Minimum Token Amount",
+            placeholder="Min tokens for notifications (default: 1000)",
             style=discord.TextStyle.short,
             required=False,
             default="1000"
@@ -635,7 +635,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             embed.add_field(
                 name="⚙️ Configuration",
                 value=(
-                    f"**Threshold:** `{threshold:,.2f} ADA`\n"
+                    f"**Threshold:** `{threshold:,.2f} Tokens`\n"
                     f"**Channel:** {interaction.channel.mention}\n"
                     f"**Transfer Notifications:** {'Enabled' if track_transfers else 'Disabled'}\n"
                     f"**Image URL:** {tracker.image_url or 'None'}"
@@ -791,7 +791,7 @@ async def status_command(interaction: discord.Interaction):
                 name=f"🪙 {token_name}",
                 value=(
                     f"**Policy ID:** `{policy_id}`\n"
-                    f"**Threshold:** `{tracker.threshold:,.2f} ADA`\n"
+                    f"**Threshold:** `{tracker.threshold:,.2f} Tokens`\n"
                     f"**Transfer Notifications:** {'Enabled' if tracker.track_transfers else 'Disabled'}\n"
                     f"**Last Block:** `{tracker.last_block or 'Not started'}`"
                 ),
@@ -868,6 +868,7 @@ async def check_transactions():
                             
                         tx_type, ada_amount, token_amount, analysis_details = await analyze_transaction_improved(tx_details, policy_id)
                         
+                        # For DEX trades, check ADA amount
                         if tx_type == 'dex_trade' and ada_amount >= tracker.threshold:
                             logger.info(f"Found DEX trade transaction: {tx.tx_hash}")
                             embed = await create_trade_embed(
@@ -878,8 +879,9 @@ async def check_transactions():
                                 if channel:
                                     await channel.send(embed=embed)
                                     
-                        elif tx_type == 'wallet_transfer' and tracker.track_transfers:
-                            logger.info(f"Found wallet transfer transaction: {tx.tx_hash}")
+                        # For transfers, check token amount
+                        elif tx_type == 'wallet_transfer' and tracker.track_transfers and token_amount >= tracker.threshold:
+                            logger.info(f"Found large wallet transfer: {tx.tx_hash}")
                             transfer_embed = await create_transfer_embed(
                                 tx_details, policy_id, token_amount, tracker
                             )
