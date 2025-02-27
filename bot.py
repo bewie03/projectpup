@@ -771,19 +771,11 @@ async def help_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="status")
-async def status_command(interaction: discord.Interaction):
-    """Display status of currently tracked tokens"""
+@bot.tree.command(name="status", description="Show status of tracked tokens in this channel")
+async def status(interaction: discord.Interaction):
+    """Show status of tracked tokens in this channel"""
     try:
-        if not active_trackers:
-            embed = discord.Embed(
-                title="Token Tracking Status",
-                description="No tokens are currently being tracked in this channel.",
-                color=discord.Color.light_grey()
-            )
-            await interaction.response.send_message(embed=embed)
-            return
-
+        # Create embed
         embed = discord.Embed(
             title="Token Tracking Status",
             description="Currently tracked tokens in this channel:",
@@ -816,69 +808,13 @@ async def status_command(interaction: discord.Interaction):
 
         # Add footer with timestamp
         embed.set_footer(text=f"Updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Create view with refresh button
-        class StatusView(discord.ui.View):
-            def __init__(self):
-                super().__init__(timeout=None)
 
-            @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, custom_id="refresh_status")
-            async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-                try:
-                    # Defer the response
-                    await interaction.response.defer()
-                    
-                    # Create new embed with fresh data
-                    new_embed = discord.Embed(
-                        title="Token Tracking Status",
-                        description="Currently tracked tokens in this channel:",
-                        color=discord.Color.blue()
-                    )
-
-                    for policy_id, tracker in active_trackers.items():
-                        # Only show trackers for this channel
-                        if tracker.channel_id != interaction.channel_id:
-                            continue
-
-                        token_name = tracker.token_name
-                        
-                        # Add field for each token
-                        new_embed.add_field(
-                            name=token_name,
-                            value=(
-                                f"Policy ID: `{policy_id}`\n"
-                                f"Threshold: `{tracker.threshold:,.2f}`\n"
-                                f"Transfers: `{'On' if tracker.track_transfers else 'Off'}`\n"
-                                f"Trade Alerts: `{tracker.trade_notifications}`\n"
-                                f"Transfer Alerts: `{tracker.transfer_notifications}`"
-                            ),
-                            inline=False
-                        )
-
-                        # Set thumbnail to the first token's image
-                        if tracker.image_url and not new_embed.thumbnail:
-                            new_embed.set_thumbnail(url=tracker.image_url)
-
-                    # Add footer with timestamp
-                    new_embed.set_footer(text=f"Updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                    
-                    # Edit the original message
-                    await interaction.message.edit(embed=new_embed, view=StatusView())
-                except Exception as e:
-                    logger.error(f"Error refreshing status: {str(e)}", exc_info=True)
-                    await interaction.followup.send("Failed to refresh status. Please try again.", ephemeral=True)
-
-        await interaction.response.send_message(embed=embed, view=StatusView())
-        return embed  # Return embed for refresh functionality
+        # Send the embed without any view/buttons
+        await interaction.response.send_message(embed=embed)
 
     except Exception as e:
         logger.error(f"Error in status command: {str(e)}", exc_info=True)
-        embed = discord.Embed(
-            title="❌ Error",
-            description="Failed to fetch token tracking status. Please try again.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message("Failed to get status. Please try again.", ephemeral=True)
 
 @tasks.loop(seconds=60)
 async def check_transactions():
