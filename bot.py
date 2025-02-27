@@ -105,6 +105,8 @@ async def get_token_info(api: BlockFrostApi, policy_id: str):
         
         # Get assets for the policy ID (this returns a list directly, no need to await)
         assets = api.assets_policy(policy_id=policy_id)
+        if isinstance(assets, Exception):
+            raise assets
         
         if not assets:
             logger.warning(f"No assets found for policy_id: {policy_id}")
@@ -114,8 +116,10 @@ async def get_token_info(api: BlockFrostApi, policy_id: str):
         asset = assets[0]
         asset_id = f"{policy_id}{asset.asset_name.hex() if asset.asset_name else ''}"
         
-        # This needs to be awaited as it's an async call
-        asset_details = await api.asset(asset_id)
+        # Get asset details
+        asset_details = api.asset(asset_id)
+        if isinstance(asset_details, Exception):
+            raise asset_details
         
         if not asset_details:
             logger.warning(f"No details found for asset: {asset_id}")
@@ -139,15 +143,21 @@ async def get_transaction_details(api: BlockFrostApi, tx_hash: str):
     try:
         logger.info(f"Fetching transaction details for tx_hash: {tx_hash}")
         # Get detailed transaction information
-        tx = await api.transaction(tx_hash)
+        tx = api.transaction(tx_hash)
+        if isinstance(tx, Exception):
+            raise tx
         logger.debug(f"Transaction details retrieved: {tx_hash}")
         
         # Get transaction UTXOs
-        utxos = await api.transaction_utxos(tx_hash)
+        utxos = api.transaction_utxos(tx_hash)
+        if isinstance(utxos, Exception):
+            raise utxos
         logger.debug(f"Transaction UTXOs retrieved: {tx_hash}")
         
         # Get transaction metadata if available
-        metadata = await api.transaction_metadata(tx_hash)
+        metadata = api.transaction_metadata(tx_hash)
+        if isinstance(metadata, Exception):
+            raise metadata
         logger.debug(f"Transaction metadata retrieved: {tx_hash}")
         
         return tx, utxos, metadata
@@ -444,33 +454,66 @@ def shorten_address(address):
         return "Unknown"
     return address[:8] + "..." + address[-4:] if len(address) > 12 else address
 
-@bot.event
-async def on_ready():
-    logger.info(f"Bot is ready: {bot.user}")
-    
-    # Load trackers from database
-    try:
-        saved_trackers = db.get_all_token_trackers()
-        for tracker_data in saved_trackers:
-            tracker = TokenTracker(
-                policy_id=tracker_data['policy_id'],
-                image_url=tracker_data.get('image_url'),
-                threshold=tracker_data['threshold'],
-                channel_id=tracker_data['channel_id']
-            )
-            tracker.last_block = tracker_data.get('last_block')
-            tracker.track_transfers = tracker_data.get('track_transfers', True)
-            active_trackers[tracker.policy_id] = tracker
-            logger.info(f"Loaded tracker from database: {tracker_data['policy_id']}")
-    except Exception as e:
-        logger.error(f"Failed to load trackers from database: {str(e)}", exc_info=True)
+class TokenControls(discord.ui.View):
+    def __init__(self, policy_id: str):
+        super().__init__(timeout=None)  # Buttons don't timeout
+        self.policy_id = policy_id
 
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
-        check_transactions.start()
-    except Exception as e:
-        logger.error(f"Error syncing commands: {str(e)}", exc_info=True)
+    @discord.ui.button(label="🛑 Stop Tracking", style=discord.ButtonStyle.danger, custom_id="stop_tracking")
+    async def stop_tracking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Stop tracking the token"""
+        try:
+            if self.policy_id in active_trackers:
+                # Remove from database
+                try:
+                    db.delete_token_tracker(self.policy_id, interaction.channel_id)
+                except Exception as e:
+                    logger.error(f"Failed to delete token tracker from database: {str(e)}", exc_info=True)
+                
+                # Remove from memory
+                del active_trackers[self.policy_id]
+                
+                embed = discord.Embed(
+                    title="🛑 Tracking Stopped",
+                    description=f"Successfully stopped tracking token with policy ID: `{self.policy_id}`",
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+                logger.info(f"Stopped tracking token: {self.policy_id}")
+            else:
+                await interaction.response.send_message("Not tracking this token anymore.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error in stop tracking button: {str(e)}", exc_info=True)
+            await interaction.response.send_message("Failed to stop tracking. Please try again.", ephemeral=True)
+
+    @discord.ui.button(label="🔄 Toggle Transfers", style=discord.ButtonStyle.primary, custom_id="toggle_transfers")
+    async def toggle_transfers(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Toggle transfer notifications"""
+        try:
+            if self.policy_id in active_trackers:
+                tracker = active_trackers[self.policy_id]
+                tracker.track_transfers = not tracker.track_transfers
+                
+                # Update database
+                try:
+                    db.save_token_tracker({
+                        'policy_id': self.policy_id,
+                        'image_url': tracker.image_url,
+                        'threshold': tracker.threshold,
+                        'channel_id': interaction.channel_id,
+                        'last_block': tracker.last_block,
+                        'track_transfers': tracker.track_transfers
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to update token tracker in database: {str(e)}", exc_info=True)
+                
+                status = "enabled" if tracker.track_transfers else "disabled"
+                await interaction.response.send_message(f"Transfer notifications {status} for this token.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Not tracking this token anymore.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error in toggle transfers button: {str(e)}", exc_info=True)
+            await interaction.response.send_message("Failed to toggle transfers. Please try again.", ephemeral=True)
 
 @bot.tree.command(name="start", description="Start tracking token purchases and transfers")
 async def start(interaction: discord.Interaction, policy_id: str, image_url: str, threshold: float, track_transfers: bool = True):
@@ -662,7 +705,10 @@ async def check_transactions():
         for policy_id, tracker in active_trackers.items():
             try:
                 if not tracker.last_block:
-                    latest_block = await api.block_latest()
+                    # Get latest block height
+                    latest_block = api.block_latest()
+                    if isinstance(latest_block, Exception):
+                        raise latest_block
                     tracker.last_block = latest_block.height
                     logger.info(f"Set initial block height for {policy_id}: {tracker.last_block}")
                     
@@ -673,12 +719,18 @@ async def check_transactions():
                         logger.error(f"Failed to update last block in database: {str(e)}", exc_info=True)
                     continue
 
-                transactions = await api.address_transactions(policy_id, from_block=tracker.last_block)
+                # Get transactions since last check
+                transactions = api.address_transactions(policy_id, from_block=tracker.last_block)
+                if isinstance(transactions, Exception):
+                    raise transactions
                 logger.info(f"Found {len(transactions)} new transactions for {policy_id}")
                 
                 for tx in transactions:
                     try:
-                        tx_details = await api.transaction(tx.tx_hash)
+                        tx_details = api.transaction(tx.tx_hash)
+                        if isinstance(tx_details, Exception):
+                            raise tx_details
+                            
                         tx_type, ada_amount, token_amount, analysis_details = await analyze_transaction_improved(tx_details, policy_id)
                         
                         if tx_type == 'dex_trade' and ada_amount >= tracker.threshold:
@@ -706,7 +758,9 @@ async def check_transactions():
                         continue
 
                 # Update last block height
-                latest_block = await api.block_latest()
+                latest_block = api.block_latest()
+                if isinstance(latest_block, Exception):
+                    raise latest_block
                 tracker.last_block = latest_block.height
                 logger.debug(f"Updated last block height for {policy_id}: {tracker.last_block}")
                 
@@ -722,6 +776,34 @@ async def check_transactions():
 
     except Exception as e:
         logger.error(f"Error in check_transactions task: {str(e)}", exc_info=True)
+
+@bot.event
+async def on_ready():
+    logger.info(f"Bot is ready: {bot.user}")
+    
+    # Load trackers from database
+    try:
+        saved_trackers = db.get_all_token_trackers()
+        for tracker_data in saved_trackers:
+            tracker = TokenTracker(
+                policy_id=tracker_data['policy_id'],
+                image_url=tracker_data.get('image_url'),
+                threshold=tracker_data['threshold'],
+                channel_id=tracker_data['channel_id']
+            )
+            tracker.last_block = tracker_data.get('last_block')
+            tracker.track_transfers = tracker_data.get('track_transfers', True)
+            active_trackers[tracker.policy_id] = tracker
+            logger.info(f"Loaded tracker from database: {tracker_data['policy_id']}")
+    except Exception as e:
+        logger.error(f"Failed to load trackers from database: {str(e)}", exc_info=True)
+
+    try:
+        synced = await bot.tree.sync()
+        logger.info(f"Synced {len(synced)} command(s)")
+        check_transactions.start()
+    except Exception as e:
+        logger.error(f"Error syncing commands: {str(e)}", exc_info=True)
 
 # Run the bot
 if __name__ == "__main__":
