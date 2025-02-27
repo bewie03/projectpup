@@ -526,6 +526,12 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             min_length=56,
             max_length=56
         )
+        self.image_url = discord.ui.TextInput(
+            label="Image URL",
+            placeholder="Enter custom image URL (optional)",
+            style=discord.TextStyle.short,
+            required=False
+        )
         self.threshold = discord.ui.TextInput(
             label="Minimum ADA Threshold",
             placeholder="Enter minimum ADA amount for notifications (default: 1000)",
@@ -542,6 +548,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
         )
         
         self.add_item(self.policy_id)
+        self.add_item(self.image_url)
         self.add_item(self.threshold)
         self.add_item(self.track_transfers)
 
@@ -557,6 +564,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             message = await interaction.original_response()
 
             policy_id = self.policy_id.value.strip()
+            image_url = self.image_url.value.strip() if self.image_url.value else None
             
             # Validate and convert threshold
             try:
@@ -588,7 +596,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             # Create new tracker
             tracker = TokenTracker(
                 policy_id=policy_id,
-                image_url=None,
+                image_url=image_url,
                 threshold=threshold,
                 channel_id=interaction.channel_id
             )
@@ -603,7 +611,9 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             
             if token_info:
                 tracker.token_info = token_info
-                tracker.image_url = token_info.get('image', '')
+                # Only use provided image_url if no token image found
+                if not image_url and token_info.get('image'):
+                    tracker.image_url = token_info.get('image')
                 
                 # Create success embed
                 embed = discord.Embed(
@@ -626,7 +636,8 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                     value=(
                         f"**Threshold:** `{threshold:,.2f} ADA`\n"
                         f"**Channel:** {interaction.channel.mention}\n"
-                        f"**Transfer Notifications:** {'Enabled' if track_transfers else 'Disabled'}"
+                        f"**Transfer Notifications:** {'Enabled' if track_transfers else 'Disabled'}\n"
+                        f"**Image URL:** {tracker.image_url or 'None'}"
                     ),
                     inline=False
                 )
