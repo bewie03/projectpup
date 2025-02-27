@@ -848,11 +848,14 @@ class TokenControls(discord.ui.View):
                 color=discord.Color.blue()
             )
             
+            # Get decimals from token_info
+            decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
+            
             # Basic token info
             token_text = (
                 f"**Policy ID:** ```{tracker.policy_id}```\n"
                 f"**Name:** ```{tracker.token_name}```\n"
-                f"**Decimals:** ```{tracker.decimals}```"
+                f"**Decimals:** ```{decimals}```"
             )
             embed.add_field(
                 name="Token Information",
@@ -863,12 +866,12 @@ class TokenControls(discord.ui.View):
             # Configuration section
             config_text = (
                 f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
-
+                f"**Channel:** <#{tracker.channel_id}>\n"
                 f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
-
+                f"**Image:** [View]({tracker.image_url})" if tracker.image_url else ""
             )
             embed.add_field(
-                name="",
+                name="Configuration",
                 value=config_text,
                 inline=False
             )
@@ -876,10 +879,10 @@ class TokenControls(discord.ui.View):
             # Statistics
             stats_text = (
                 f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
-                f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
+                f"**Transfer Notifications:** ```{tracker.transfer_notifications}```"
             )
             embed.add_field(
-                name="",
+                name="Statistics",
                 value=stats_text,
                 inline=False
             )
