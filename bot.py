@@ -332,11 +332,25 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
             logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}, skipping notification")
             return
             
-        # Get the channel
+        # Try to get the channel, if not found try to fetch it
         channel = bot.get_channel(tracker.channel_id)
         if not channel:
-            logger.error(f"Could not find channel {tracker.channel_id}")
-            return
+            try:
+                # Try to fetch the channel
+                channel = await bot.fetch_channel(tracker.channel_id)
+            except discord.NotFound:
+                logger.error(f"Channel {tracker.channel_id} no longer exists")
+                # Remove tracker since channel is gone
+                if tracker.policy_id in active_trackers:
+                    del active_trackers[tracker.policy_id]
+                database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
+                return
+            except discord.Forbidden:
+                logger.error(f"Bot does not have access to channel {tracker.channel_id}")
+                return
+            except Exception as e:
+                logger.error(f"Error fetching channel {tracker.channel_id}: {str(e)}")
+                return
             
         # Create appropriate embed based on transaction type
         if tx_type in ['buy', 'sell']:
@@ -1177,22 +1191,21 @@ async def status_command(interaction: discord.Interaction):
             )
             
             # Basic token info
-            token_text = (
-                f"**Policy ID:** ```{tracker.policy_id}```\n"
-                f"**Name:** ```{tracker.token_name}```"
+            embed.add_field(
+                name="Token",
+                value=f"```{tracker.token_name}```",
+                inline=True
             )
             embed.add_field(
-                name="Token Information",
-                value=token_text,
+                name="Policy ID",
+                value=f"```{tracker.policy_id}```",
                 inline=False
             )
             
             # Configuration section
             config_text = (
                 f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
-                f"**Channel:** <#{tracker.channel_id}>\n"
                 f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
-                f"**Image:** [View]({tracker.image_url})" if tracker.image_url else ""
             )
             embed.add_field(
                 name="",
