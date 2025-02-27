@@ -991,6 +991,62 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             )
             await interaction.response.send_message(embed=error_embed)
 
+async def send_start_message(interaction, policy_id, token_name, threshold, track_transfers, image_url):
+    """Send the initial token tracking started message"""
+    embed = discord.Embed(
+        title="✅ Token Tracking Active",
+        description="Successfully initialized tracking for:",
+        color=discord.Color.green()
+    )
+
+    # Basic token info
+    embed.add_field(
+        name="Token",
+        value=f"`{token_name}`",
+        inline=True
+    )
+    embed.add_field(
+        name="Policy ID",
+        value=f"`{policy_id}`",
+        inline=False
+    )
+
+    # Configuration section
+    config_text = (
+        f"**Threshold:** `{threshold:,.2f} Tokens`\n"
+        f"**Channel:** <#{interaction.channel_id}>\n"
+        f"**Transfer Notifications:** `{'Enabled' if track_transfers else 'Disabled'}`\n"
+        f"**Image:** [View]({image_url})"
+    )
+    embed.add_field(
+        name="⚙️ Configuration",
+        value=config_text,
+        inline=False
+    )
+
+    # Statistics
+    stats_text = (
+        f"**Trade Notifications:** `0`\n"
+        f"**Transfer Notifications:** `0`\n"
+        f"**Last Block:** `None`"
+    )
+    embed.add_field(
+        name="📊 Statistics",
+        value=stats_text,
+        inline=False
+    )
+
+    # Set footer with tracking start time
+    embed.set_footer(text=f"Started tracking at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+    # Set token image if available
+    if image_url:
+        embed.set_thumbnail(url=image_url)
+
+    # Add control buttons
+    view = TokenControls(policy_id)
+    await interaction.response.send_message(embed=embed, view=view)
+
 @bot.tree.command(name="start", description="Start tracking token purchases and transfers")
 async def start(interaction: discord.Interaction):
     """Start tracking a token by opening a setup form"""
@@ -1068,67 +1124,45 @@ async def status(interaction: discord.Interaction):
         # Create an embed for each tracker
         for tracker in channel_trackers:
             embed = discord.Embed(
-                title=f"✅ Token Tracking Active",
-                description=f"Currently tracking the following token:",
+                title="✅ Token Tracking Active",
+                description="Currently tracking the following token:",
                 color=discord.Color.green()
             )
             
             # Basic token info
             embed.add_field(
-                name="Token:",
-                value=tracker.token_name,
+                name="Token",
+                value=f"`{tracker.token_name}`",
                 inline=True
             )
             embed.add_field(
-                name="Policy ID:",
+                name="Policy ID",
                 value=f"`{tracker.policy_id}`",
                 inline=False
             )
 
             # Configuration section
+            config_text = (
+                f"**Threshold:** `{tracker.threshold:,.2f} Tokens`\n"
+                f"**Channel:** <#{tracker.channel_id}>\n"
+                f"**Transfer Notifications:** `{'Enabled' if tracker.track_transfers else 'Disabled'}`\n"
+                f"**Image:** [View]({tracker.image_url})"
+            )
             embed.add_field(
                 name="⚙️ Configuration",
-                value=(
-                    f"**Threshold:** {tracker.threshold:,.2f} Tokens\n"
-                    f"**Channel:** <#{tracker.channel_id}>\n"
-                    f"**Transfer Notifications:** {'Enabled' if tracker.track_transfers else 'Disabled'}\n"
-                    f"**Image URL:** {tracker.image_url or 'Not set'}"
-                ),
+                value=config_text,
                 inline=False
             )
 
-            # Monitoring section
-            embed.add_field(
-                name="🔍 Monitoring",
-                value=(
-                    "• DEX Trades (Buys/Sells)\n"
-                    "• Wallet Transfers\n"
-                    "• Real-time Notifications\n"
-                    "• Customizable Thresholds"
-                ),
-                inline=True
+            # Statistics
+            stats_text = (
+                f"**Trade Notifications:** `{tracker.trade_notifications}`\n"
+                f"**Transfer Notifications:** `{tracker.transfer_notifications}`\n"
+                f"**Last Block:** `{tracker.last_block or 'None'}`"
             )
-
-            # Notifications section
-            embed.add_field(
-                name="🔔 Notifications",
-                value=(
-                    "• Trade Amount\n"
-                    "• Wallet Addresses\n"
-                    "• Block Height\n"
-                    "• Transaction Hash"
-                ),
-                inline=True
-            )
-
-            # Stats
             embed.add_field(
                 name="📊 Statistics",
-                value=(
-                    f"**Trade Notifications:** {tracker.trade_notifications}\n"
-                    f"**Transfer Notifications:** {tracker.transfer_notifications}\n"
-                    f"**Last Block:** {tracker.last_block or 'None'}"
-                ),
+                value=stats_text,
                 inline=False
             )
 
