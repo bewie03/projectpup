@@ -86,10 +86,6 @@ api = BlockFrostApi(
     base_url=ApiUrls.mainnet.value
 )
 
-# Store active tracking configurations
-# Key format: f"{policy_id}:{channel_id}"
-active_trackers = {}
-
 # Webhook secret for verification
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
 WEBHOOK_TOLERANCE_SECONDS = 600  # 10 minutes, same as Blockfrost SDK default
@@ -200,10 +196,10 @@ async def transaction_webhook(request: Request):
                 continue
                 
             # Check if any of our tracked tokens are involved
-            logger.info(f"Checking {len(active_trackers)} tracked tokens")
+            trackers = database.get_trackers()
+            logger.info(f"Checking {len(trackers)} tracked tokens")
             
-            for key, tracker in active_trackers.items():
-                policy_id, channel_id = key.split(":")
+            for tracker in trackers:
                 # Check inputs and outputs for our policy ID
                 is_involved = False
                 
@@ -217,7 +213,7 @@ async def transaction_webhook(request: Request):
                         logger.debug(f"Checking input unit: {unit}")
                         
                         # Only check policy ID in webhook handler
-                        if unit.startswith(policy_id):
+                        if unit.startswith(tracker.policy_id):
                             is_involved = True
                             logger.info(f"Found token {tracker.token_name} in transaction inputs")
                             break
@@ -235,7 +231,7 @@ async def transaction_webhook(request: Request):
                             logger.debug(f"Checking output unit: {unit}")
                             
                             # Only check policy ID in webhook handler
-                            if unit.startswith(policy_id):
+                            if unit.startswith(tracker.policy_id):
                                 is_involved = True
                                 logger.info(f"Found token {tracker.token_name} in transaction outputs")
                                 break
@@ -287,11 +283,8 @@ async def on_ready():
         
         for tracker in trackers:
             try:
-                # Create composite key
-                key = f"{tracker.policy_id}:{tracker.channel_id}"
-                
                 # Convert database model to TokenTracker object
-                active_trackers[key] = TokenTracker(
+                active_trackers[tracker.policy_id] = TokenTracker(
                     policy_id=tracker.policy_id,
                     channel_id=int(tracker.channel_id),  # Ensure it's an int
                     token_name=tracker.token_name,
@@ -318,6 +311,9 @@ async def on_ready():
             
     except Exception as e:
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
+
+# Store active tracking configurations
+active_trackers = {}
 
 class TokenTracker:
     def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
@@ -381,9 +377,8 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         if not channel:
             logger.error(f"Channel {tracker.channel_id} not found in any guild")
             # Remove tracker since channel is not accessible
-            key = f"{tracker.policy_id}:{tracker.channel_id}"
-            if key in active_trackers:
-                del active_trackers[key]
+            if tracker.policy_id in active_trackers:
+                del active_trackers[tracker.policy_id]
             database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
             return
             
@@ -858,13 +853,12 @@ class TokenControls(discord.ui.View):
     @discord.ui.button(label="Stop Tracking", style=discord.ButtonStyle.danger, emoji="⛔")
     async def stop_tracking(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            key = f"{self.policy_id}:{interaction.channel_id}"
-            if key in active_trackers:
+            if self.policy_id in active_trackers:
                 # Remove from database
                 database.delete_token_tracker(self.policy_id, interaction.channel_id)
                 
                 # Remove from active trackers
-                del active_trackers[key]
+                del active_trackers[self.policy_id]
             
                 # Update message
                 embed = discord.Embed(
@@ -890,8 +884,7 @@ class TokenControls(discord.ui.View):
     async def toggle_transfers(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             # Get the tracker
-            key = f"{self.policy_id}:{interaction.channel_id}"
-            tracker = active_trackers.get(key)
+            tracker = active_trackers.get(self.policy_id)
             if not tracker:
                 await interaction.response.send_message("❌ Token tracker not found.", ephemeral=True)
                 return
@@ -1109,8 +1102,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             await interaction.response.send_message(embed=embed, view=view)
             
             # Save to memory and database
-            key = f"{tracker.policy_id}:{tracker.channel_id}"
-            active_trackers[key] = tracker
+            active_trackers[tracker.policy_id] = tracker
             
             logger.info(f"Started tracking token: {tracker.token_name} ({tracker.policy_id})")
                 
@@ -1229,7 +1221,7 @@ async def status_command(interaction: discord.Interaction):
     """Show status of tracked tokens in this channel"""
     try:
         # Get all trackers for this channel
-        channel_trackers = [t for key, t in active_trackers.items() if int(key.split(":")[1]) == interaction.channel_id]
+        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
         if not channel_trackers:
             embed = discord.Embed(
                 title="❌ No Active Trackers",
@@ -1304,7 +1296,7 @@ async def stop(interaction: discord.Interaction):
     """Stop tracking all tokens in this channel"""
     try:
         # Check if there are any trackers for this channel
-        channel_trackers = [t for key, t in active_trackers.items() if int(key.split(":")[1]) == interaction.channel_id]
+        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
         if not channel_trackers:
             await interaction.response.send_message("No tokens are being tracked in this channel.", ephemeral=True)
             return
@@ -1334,9 +1326,9 @@ async def stop(interaction: discord.Interaction):
         
                     # Remove from active trackers
                     policies_to_remove = []
-                    for key, tracker in active_trackers.items():
-                        if int(key.split(":")[1]) == interaction.channel_id:
-                            policies_to_remove.append(key)
+                    for policy_id, tracker in active_trackers.items():
+                        if tracker.channel_id == interaction.channel_id:
+                            policies_to_remove.append(policy_id)
                     
                     for policy_id in policies_to_remove:
                         del active_trackers[policy_id]
