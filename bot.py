@@ -312,57 +312,36 @@ def run_webhook_server():
 async def on_ready():
     """Called when the bot is ready"""
     try:
-        # Load all trackers from database
-        trackers = database.get_trackers()
-        logger.info(f"Loading {len(trackers)} trackers from database")
-        
+        # Load all trackers from database into memory
+        trackers = database.get_all_token_trackers()
         for tracker in trackers:
-            try:
-                # Create composite key from policy_id and channel_id
-                tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
-                
-                # Convert database model to TokenTracker object
-                active_trackers[tracker_key] = TokenTracker(
-                    policy_id=tracker.policy_id,
-                    channel_id=int(tracker.channel_id),  # Ensure it's an int
-                    token_name=tracker.token_name,
-                    image_url=tracker.image_url,
-                    threshold=tracker.threshold,
-                    track_transfers=tracker.track_transfers,
-                    last_block=tracker.last_block,
-                    trade_notifications=tracker.trade_notifications,
-                    transfer_notifications=tracker.transfer_notifications,
-                    token_info=tracker.token_info
-                )
-                
-                # Check if channel is accessible
-                channel = bot.get_channel(tracker.channel_id)
-                if not channel:
-                    for guild in bot.guilds:
-                        channel = guild.get_channel(tracker.channel_id)
-                        if channel:
-                            break
-                
-                if not channel:
-                    logger.error(f"Channel {tracker.channel_id} not found in any guild")
-                    # Remove tracker since channel is not accessible
-                    del active_trackers[tracker_key]
-                    database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
-                    continue
-                
-                logger.info(f"Loaded tracker for {tracker.token_name} in channel {tracker.channel_id}")
-            except Exception as e:
-                logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
-                
-        # Sync slash commands
-        await bot.tree.sync()
-        logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
+            tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
+            active_trackers[tracker_key] = TokenTracker(
+                policy_id=tracker.policy_id,
+                channel_id=tracker.channel_id,
+                token_name=tracker.token_name,
+                image_url=tracker.image_url,
+                threshold=tracker.threshold,
+                track_transfers=tracker.track_transfers,
+                last_block=tracker.last_block,
+                trade_notifications=tracker.trade_notifications,
+                transfer_notifications=tracker.transfer_notifications,
+                token_info=tracker.token_info
+            )
+            logger.info(f"Loaded tracker {tracker_key} into memory")
         
-        # Log guild information
-        for guild in bot.guilds:
-            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
-            logger.info(f"Available channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
+        logger.info(f"Loaded {len(trackers)} trackers from database")
+        
+        # Sync commands
+        synced = await bot.tree.sync()
+        logger.info(f"Synced {len(synced)} command(s)")
+        
+        # Start background tasks
+        if not check_transactions.is_running():
+            check_transactions.start()
             
+        logger.info(f"{bot.user} is ready and online!")
+        
     except Exception as e:
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
 
