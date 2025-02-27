@@ -150,6 +150,35 @@ class Database:
         finally:
             session.close()
 
+    def save_token_tracker(self, tracker_data):
+        """Save a token tracker to the database"""
+        session = self.Session()
+        try:
+            # Check if tracker already exists
+            existing = session.query(TokenTracker).filter_by(
+                policy_id=tracker_data['policy_id'],
+                channel_id=tracker_data['channel_id']
+            ).first()
+            
+            if existing:
+                # Update existing tracker
+                for key, value in tracker_data.items():
+                    setattr(existing, key, value)
+                tracker = existing
+            else:
+                # Create new tracker
+                tracker = TokenTracker(**tracker_data)
+                session.add(tracker)
+            
+            session.commit()
+            return tracker
+        except SQLAlchemyError as e:
+            logger.error(f"Database error while saving token tracker: {str(e)}", exc_info=True)
+            session.rollback()
+            return None
+        finally:
+            session.close()
+
     def update_last_block(self, policy_id, channel_id, block_height):
         """Update the last processed block height for a token tracker"""
         session = self.Session()
