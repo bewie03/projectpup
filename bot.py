@@ -536,9 +536,16 @@ def analyze_transaction_improved(tx_details, policy_id):
         ada_amount = abs(ada_out - ada_in)
         raw_token_amount = abs(token_out - token_in)
         
-        # Convert token amount using decimals only if needed
+        # Only apply decimal conversion if decimals > 0
+        # For tokens with 0 decimals, use the raw amount
         token_amount = raw_token_amount / (10 ** decimals) if decimals > 0 else raw_token_amount
         logger.info(f"Raw token amount: {raw_token_amount}, Decimals: {decimals}, Converted amount: {token_amount}")
+
+        # Log token movement
+        if token_in > 0:
+            logger.info(f"Token input: {token_in}")
+        if token_out > 0:
+            logger.info(f"Token output: {token_out}")
 
         # Store details for notification
         details = {
@@ -554,12 +561,6 @@ def analyze_transaction_improved(tx_details, policy_id):
         # Determine transaction type
         has_policy_in_input = token_in > 0
         has_policy_in_output = token_out > 0
-
-        # Log token movement
-        if has_policy_in_input:
-            logger.info(f"Token input: {token_in}")
-        if has_policy_in_output:
-            logger.info(f"Token output: {token_out}")
 
         # Determine transaction type
         if has_policy_in_input and has_policy_in_output:
