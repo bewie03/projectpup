@@ -7,64 +7,108 @@ def get_db_connection():
     DATABASE_URL = "postgres://uf96h0a7396t3j:p98406daed2890173604432daf725ecedc22819e058d1019c79681d6c84a65501@cd27da2sn4hj7h.cluster-czrs8kj4isg7.us-east-1.rds.amazonaws.com:5432/dbu70voivfu6u8"
     return psycopg2.connect(DATABASE_URL)
 
-def create_tables():
-    """Create the database tables if they don't exist"""
+def recreate_tables():
+    """Drop and recreate the database tables"""
     conn = get_db_connection()
     cur = conn.cursor()
     
     try:
+        # Drop existing table
+        cur.execute('DROP TABLE IF EXISTS trackers')
+        
         # Create trackers table
         cur.execute('''
-            CREATE TABLE IF NOT EXISTS trackers (
+            CREATE TABLE trackers (
                 policy_id TEXT PRIMARY KEY,
-                channel_id INTEGER,
+                channel_id BIGINT NOT NULL,
                 token_name TEXT,
                 image_url TEXT,
-                threshold REAL,
-                track_transfers BOOLEAN,
-                last_block INTEGER,
-                trade_notifications INTEGER,
-                transfer_notifications INTEGER,
+                threshold REAL NOT NULL DEFAULT 1000.0,
+                track_transfers BOOLEAN NOT NULL DEFAULT TRUE,
+                last_block BIGINT NOT NULL DEFAULT 0,
+                trade_notifications INTEGER NOT NULL DEFAULT 0,
+                transfer_notifications INTEGER NOT NULL DEFAULT 0,
                 token_info JSONB
             )
         ''')
         
         conn.commit()
-        print("Database tables created successfully!")
+        print("Database tables recreated successfully!")
         
     except Exception as e:
-        print(f"Error creating tables: {str(e)}")
+        print(f"Error recreating tables: {str(e)}")
         conn.rollback()
     finally:
         cur.close()
         conn.close()
 
-def migrate_database():
-    """Add token_info column to token_trackers table"""
+def show_table_info():
+    """Show detailed information about the database tables"""
     conn = get_db_connection()
     cur = conn.cursor()
     
     try:
-        # Check if token_info column exists
+        # List all tables
+        print("\n=== Database Tables ===")
         cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'trackers' 
-            AND column_name = 'token_info'
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+            AND table_name != 'pg_stat_statements_info'
         """)
-        exists = cur.fetchone()
+        tables = cur.fetchall()
         
-        if not exists:
-            print("Adding token_info column to trackers table...")
-            cur.execute('ALTER TABLE trackers ADD COLUMN token_info JSONB')
-            conn.commit()
-            print("Migration successful!")
-        else:
-            print("token_info column already exists")
+        for table in tables:
+            table_name = table[0]
+            print(f"\n=== Table: {table_name} ===")
+            
+            # Show columns and their types
+            cur.execute("""
+                SELECT column_name, data_type, is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_name = %s
+                ORDER BY ordinal_position
+            """, (table_name,))
+            
+            columns = cur.fetchall()
+            print("\nColumns:")
+            for col in columns:
+                print(f"  {col[0]:<20} {col[1]:<15} {'NULL' if col[2]=='YES' else 'NOT NULL':<10} Default: {col[3] or 'None'}")
+            
+            # Show row count
+            cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+            count = cur.fetchone()[0]
+            print(f"\nTotal rows: {count}")
+            
+            if count > 0:
+                # Show sample data
+                cur.execute(f"SELECT * FROM {table_name} LIMIT 5")
+                rows = cur.fetchall()
+                print("\nSample data:")
+                for row in rows:
+                    print("\nRow:")
+                    for i, value in enumerate(row):
+                        if columns[i][0] == 'token_info' and value:
+                            print(f"  {columns[i][0]}: {json.dumps(value, indent=2)}")
+                        else:
+                            print(f"  {columns[i][0]}: {value}")
+            
+            # Show indexes
+            cur.execute("""
+                SELECT indexname, indexdef
+                FROM pg_indexes
+                WHERE tablename = %s
+            """, (table_name,))
+            indexes = cur.fetchall()
+            if indexes:
+                print("\nIndexes:")
+                for idx in indexes:
+                    print(f"  {idx[0]}: {idx[1]}")
+            
+            print("-" * 80)
             
     except Exception as e:
-        print(f"Error during migration: {str(e)}")
-        conn.rollback()
+        print(f"Error inspecting database: {str(e)}")
     finally:
         cur.close()
         conn.close()
@@ -112,9 +156,9 @@ def inspect_database():
         conn.close()
 
 if __name__ == "__main__":
-    # First create/migrate the database
-    create_tables()
-    migrate_database()
+    # Recreate tables with correct schema
+    recreate_tables()
     
-    # Then show current state
+    # Show detailed info
+    show_table_info()
     inspect_database()

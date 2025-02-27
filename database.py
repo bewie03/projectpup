@@ -15,19 +15,17 @@ Base = declarative_base()
 
 class TokenTracker(Base):
     """Model for token tracking configuration"""
-    __tablename__ = 'token_trackers'
+    __tablename__ = 'trackers'
     
     policy_id = Column(String, primary_key=True)
-    channel_id = Column(BigInteger)
+    channel_id = Column(BigInteger, nullable=False)
     token_name = Column(String)
     image_url = Column(String)
-    threshold = Column(Float, default=1000.0)
-    track_transfers = Column(Boolean, default=True)
-    last_block = Column(BigInteger, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    trade_notifications = Column(Integer, default=0)
-    transfer_notifications = Column(Integer, default=0)
+    threshold = Column(Float, default=1000.0, nullable=False)
+    track_transfers = Column(Boolean, default=True, nullable=False)
+    last_block = Column(BigInteger, default=0, nullable=False)
+    trade_notifications = Column(Integer, default=0, nullable=False)
+    transfer_notifications = Column(Integer, default=0, nullable=False)
     token_info = Column(JSON)
     
     def to_dict(self):
@@ -40,8 +38,6 @@ class TokenTracker(Base):
             'threshold': self.threshold,
             'track_transfers': self.track_transfers,
             'last_block': self.last_block,
-            'created_at': self.created_at,
-            'updated_at': self.updated_at,
             'trade_notifications': self.trade_notifications,
             'transfer_notifications': self.transfer_notifications,
             'token_info': self.token_info
