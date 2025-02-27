@@ -427,10 +427,11 @@ def analyze_transaction_improved(tx_details, policy_id):
     Returns: (type, ada_amount, token_amount, details)
     """
     try:
-        # Get the utxos
-        utxos = tx_details.get('utxos', {})
-        if not utxos:
-            logger.warning(f"No UTXOs found in transaction")
+        # Get the inputs and outputs
+        inputs = tx_details.get('inputs', [])
+        outputs = tx_details.get('outputs', [])
+        if not inputs and not outputs:
+            logger.warning(f"No inputs/outputs found in transaction")
             return 'unknown', 0, 0, {}
 
         # Initialize amounts
@@ -441,52 +442,53 @@ def analyze_transaction_improved(tx_details, policy_id):
         details = {}
 
         # Check inputs
-        for utxo in utxos.get('inputs', []):
-            if 'amount' in utxo:
-                for amount in utxo['amount']:
-                    if 'unit' in amount and policy_id in amount['unit']:
-                        token_in += int(amount['quantity'])
-                    elif 'unit' in amount and amount['unit'] == 'lovelace':
-                        ada_in += int(amount['quantity'])
+        for inp in inputs:
+            for amount in inp.get('amount', []):
+                if 'unit' in amount and policy_id in amount['unit']:
+                    token_in += int(amount['quantity'])
+                elif 'unit' in amount and amount['unit'] == 'lovelace':
+                    ada_in += int(amount['quantity'])
 
         # Check outputs
-        for utxo in utxos.get('outputs', []):
-            if 'amount' in utxo:
-                for amount in utxo['amount']:
-                    if 'unit' in amount and policy_id in amount['unit']:
-                        token_out += int(amount['quantity'])
-                    elif 'unit' in amount and amount['unit'] == 'lovelace':
-                        ada_out += int(amount['quantity'])
+        for out in outputs:
+            for amount in out.get('amount', []):
+                if 'unit' in amount and policy_id in amount['unit']:
+                    token_out += int(amount['quantity'])
+                elif 'unit' in amount and amount['unit'] == 'lovelace':
+                    ada_out += int(amount['quantity'])
 
         # Convert lovelace to ADA
         ada_in = ada_in / 1_000_000
         ada_out = ada_out / 1_000_000
-        
+
         # Calculate net amounts
-        net_ada = ada_out - ada_in
-        net_tokens = token_out - token_in
+        ada_amount = abs(ada_out - ada_in)
+        token_amount = abs(token_out - token_in)
 
         # Determine transaction type
-        MIN_ADA_FOR_TRADE = 3  # Minimum ADA difference to consider it a trade
-        
-        if abs(net_tokens) < 100:  # Very small token movement, probably just fees
-            return 'unknown', abs(net_ada), abs(net_tokens), details
-            
-        if token_in > 0 and token_out > 0:
-            if abs(token_in - token_out) < token_in * 0.01:  # Less than 1% difference
-                return 'wallet_transfer', abs(net_ada), max(token_in, token_out), details
-                
-        # If significant ADA movement, it's likely a trade
-        if abs(net_ada) > MIN_ADA_FOR_TRADE:
-            details['direction'] = 'buy' if net_tokens > 0 else 'sell'
-            details['price_per_token'] = abs(net_ada / net_tokens) if net_tokens != 0 else 0
-            return 'dex_trade', abs(net_ada), abs(net_tokens), details
-            
-        # If we see tokens but minimal ADA, it's probably a transfer
-        return 'wallet_transfer', abs(net_ada), max(token_in, token_out), details
+        has_policy_in_input = token_in > 0
+        has_policy_in_output = token_out > 0
+
+        # Store details for notification
+        details = {
+            'ada_in': ada_in,
+            'ada_out': ada_out,
+            'token_in': token_in,
+            'token_out': token_out
+        }
+
+        # Determine transaction type
+        if has_policy_in_input and has_policy_in_output:
+            return 'wallet_transfer', ada_amount, token_amount, details
+        elif has_policy_in_input and not has_policy_in_output:
+            return 'sell', ada_amount, token_amount, details
+        elif not has_policy_in_input and has_policy_in_output:
+            return 'buy', ada_amount, token_amount, details
+        else:
+            return 'unknown', 0, 0, details
 
     except Exception as e:
-        logger.error(f"Error in analyze_transaction_improved: {str(e)}", exc_info=True)
+        logger.error(f"Error analyzing transaction: {str(e)}", exc_info=True)
         return 'unknown', 0, 0, {}
 
 async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tracker, analysis_details):
