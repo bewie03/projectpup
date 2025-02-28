@@ -19,6 +19,7 @@ import hashlib
 import uvicorn
 import threading
 import time
+import redis
 
 # Load environment variables
 load_dotenv()
@@ -73,6 +74,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize Redis for cross-dyno communication
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+redis = redis.from_url(redis_url)
+
 # Initialize Discord bot with necessary intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -85,12 +90,24 @@ is_ready = asyncio.Event()
 initialization_lock = asyncio.Lock()
 initialization_error = None
 
+def is_worker():
+    """Check if we're running in the worker dyno"""
+    return os.environ.get('DYNO', '').startswith('worker')
+
+def is_web():
+    """Check if we're running in the web dyno"""
+    return os.environ.get('DYNO', '').startswith('web')
+
 @bot.event
 async def on_ready():
     """Called when the bot is ready"""
     global initialization_error
     
     try:
+        # Only initialize in worker dyno
+        if not is_worker():
+            return
+            
         # Prevent multiple initializations
         async with initialization_lock:
             if is_ready.is_set():
@@ -111,160 +128,79 @@ async def on_ready():
             except Exception as e:
                 logger.error(f"Failed to sync slash commands: {str(e)}")
             
-            # Load trackers in background task to avoid blocking
+            # Load trackers in background task
             bot.loop.create_task(load_trackers())
             
-            # Set ready state - we can handle requests now
+            # Set ready state in Redis for web dyno
+            redis.set('bot_ready', '1')
+            redis.set('bot_error', '')
+            
+            # Set ready state locally
             is_ready.set()
             logger.info("Bot is ready and accepting requests")
             
     except Exception as e:
         initialization_error = str(e)
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
+        # Store error in Redis
+        redis.set('bot_error', str(e))
+        redis.set('bot_ready', '0')
         # Still set ready to prevent hanging
         is_ready.set()
 
 @bot.event
 async def on_disconnect():
     """Called when the bot disconnects from Discord"""
-    logger.warning("Bot disconnected from Discord")
-    # Don't clear ready state on disconnect to avoid webhook interruption
-    # is_ready.clear()
+    if is_worker():
+        logger.warning("Bot disconnected from Discord")
+        redis.set('bot_ready', '0')
 
 @bot.event
 async def on_connect():
     """Called when the bot connects to Discord"""
-    logger.info("Bot connected to Discord")
+    if is_worker():
+        logger.info("Bot connected to Discord")
 
 @bot.event
 async def on_resumed():
     """Called when the bot resumes a session"""
-    logger.info("Bot resumed connection to Discord")
-    # Don't set ready state here, it's managed by on_ready
+    if is_worker():
+        logger.info("Bot resumed connection to Discord")
+        redis.set('bot_ready', '1')
 
-async def load_trackers():
-    """Load trackers in background task"""
-    try:
-        # Load all trackers from database
-        trackers = database.get_trackers()
-        logger.info(f"Loading {len(trackers)} trackers from database")
-        
-        for tracker in trackers:
-            try:
-                # Convert database model to TokenTracker object
-                channel_id = int(tracker.channel_id)
-                key = get_tracker_key(tracker.policy_id, channel_id)
-                
-                # Verify channel exists and is accessible
-                channel_found = False
-                for guild in bot.guilds:
-                    channel = guild.get_channel(channel_id)
-                    if channel:
-                        # Verify bot has permission to send messages
-                        permissions = channel.permissions_for(guild.me)
-                        if not permissions.send_messages:
-                            logger.error(f"Bot lacks permission to send messages in channel {channel_id}")
-                            continue
-                        
-                        channel_found = True
-                        logger.info(f"Verified channel {channel_id} exists in guild {guild.name}")
-                        break
-                
-                if not channel_found:
-                    logger.warning(f"Channel {channel_id} not found in any guild or lacks permissions, skipping tracker")
-                    continue
-                
-                active_trackers[key] = TokenTracker(
-                    policy_id=tracker.policy_id,
-                    channel_id=channel_id,
-                    token_name=tracker.token_name,
-                    image_url=tracker.image_url,
-                    threshold=tracker.threshold,
-                    track_transfers=tracker.track_transfers,
-                    last_block=tracker.last_block,
-                    trade_notifications=tracker.trade_notifications,
-                    transfer_notifications=tracker.transfer_notifications,
-                    token_info=tracker.token_info
-                )
-                logger.info(f"Loaded tracker for {tracker.token_name} in channel {channel_id}")
-            except Exception as e:
-                logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
-                
-    except Exception as e:
-        logger.error(f"Error loading trackers: {str(e)}", exc_info=True)
-
-# Initialize Blockfrost API
-api = BlockFrostApi(
-    project_id=os.getenv('BLOCKFROST_API_KEY'),
-    base_url=ApiUrls.mainnet.value
-)
-
-# Webhook secret for verification
-WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
-WEBHOOK_TOLERANCE_SECONDS = 600  # 10 minutes, same as Blockfrost SDK default
-
-def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> bool:
-    """
-    Verify the Blockfrost webhook signature
+async def check_bot_ready():
+    """Check if bot is ready via Redis"""
+    ready = redis.get('bot_ready')
+    error = redis.get('bot_error')
     
-    Args:
-        payload: Raw request body bytes
-        header: Blockfrost-Signature header value
-        current_time: Current Unix timestamp
-    """
-    if not WEBHOOK_SECRET:
-        logger.warning("WEBHOOK_SECRET not set, skipping signature verification")
-        return True
-        
-    try:
-        # Parse header
-        pairs = dict(pair.split('=') for pair in header.split(','))
-        if 't' not in pairs or 'v1' not in pairs:
-            logger.error("Missing timestamp or signature in header")
-            return False
-            
-        # Get timestamp and signature
-        timestamp = pairs['t']
-        signature = pairs['v1']
-        
-        # Check timestamp
-        timestamp_diff = abs(current_time - int(timestamp))
-        if timestamp_diff > WEBHOOK_TOLERANCE_SECONDS:
-            logger.error(f"Webhook timestamp too old: {timestamp_diff} seconds")
-            return False
-            
-        # Prepare signature payload
-        signature_payload = f"{timestamp}.{payload.decode('utf-8')}"
-        
-        # Compute expected signature
-        computed = hmac.new(
-            WEBHOOK_SECRET.encode(),
-            signature_payload.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        
-        # Compare signatures
-        return hmac.compare_digest(computed, signature)
-        
-    except Exception as e:
-        logger.error(f"Error verifying webhook signature: {str(e)}", exc_info=True)
+    if not ready or ready.decode() != '1':
+        if error:
+            error_msg = error.decode()
+            if error_msg:
+                raise HTTPException(status_code=503, detail=f"Bot initialization failed: {error_msg}")
         return False
+    return True
 
 @app.post("/webhook/transaction")
 async def transaction_webhook(request: Request):
     """Handle incoming transaction webhooks from Blockfrost"""
     try:
-        # Quick check if bot is ready
-        if not is_ready.is_set():
+        # Quick check if bot is ready via Redis
+        if not await check_bot_ready():
             logger.warning("Bot is not ready, waiting for connection...")
             try:
-                # Reduced timeout to avoid Heroku H12 errors
-                await asyncio.wait_for(is_ready.wait(), timeout=15.0)
-            except asyncio.TimeoutError:
-                logger.error("Timeout waiting for bot to be ready")
-                if initialization_error:
-                    raise HTTPException(status_code=503, detail=f"Bot initialization failed: {initialization_error}")
-                raise HTTPException(status_code=503, detail="Bot not ready")
+                # Poll Redis with timeout
+                start_time = time.time()
+                while time.time() - start_time < 15.0:
+                    if await check_bot_ready():
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    logger.error("Timeout waiting for bot to be ready")
+                    raise HTTPException(status_code=503, detail="Bot not ready")
+            except Exception as e:
+                logger.error(f"Error checking bot status: {str(e)}")
+                raise HTTPException(status_code=503, detail=str(e))
         
         # Log webhook received
         logger.info("Received webhook request")
@@ -1553,6 +1489,63 @@ class TokenTracker:
     def increment_transfer_notifications(self):
         """Increment the transfer notifications counter"""
         self.transfer_notifications += 1
+
+# Initialize Blockfrost API
+api = BlockFrostApi(
+    project_id=os.getenv('BLOCKFROST_API_KEY'),
+    base_url=ApiUrls.mainnet.value
+)
+
+# Webhook secret for verification
+WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
+WEBHOOK_TOLERANCE_SECONDS = 600  # 10 minutes, same as Blockfrost SDK default
+
+def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> bool:
+    """
+    Verify the Blockfrost webhook signature
+    
+    Args:
+        payload: Raw request body bytes
+        header: Blockfrost-Signature header value
+        current_time: Current Unix timestamp
+    """
+    if not WEBHOOK_SECRET:
+        logger.warning("WEBHOOK_SECRET not set, skipping signature verification")
+        return True
+        
+    try:
+        # Parse header
+        pairs = dict(pair.split('=') for pair in header.split(','))
+        if 't' not in pairs or 'v1' not in pairs:
+            logger.error("Missing timestamp or signature in header")
+            return False
+            
+        # Get timestamp and signature
+        timestamp = pairs['t']
+        signature = pairs['v1']
+        
+        # Check timestamp
+        timestamp_diff = abs(current_time - int(timestamp))
+        if timestamp_diff > WEBHOOK_TOLERANCE_SECONDS:
+            logger.error(f"Webhook timestamp too old: {timestamp_diff} seconds")
+            return False
+            
+        # Prepare signature payload
+        signature_payload = f"{timestamp}.{payload.decode('utf-8')}"
+        
+        # Compute expected signature
+        computed = hmac.new(
+            WEBHOOK_SECRET.encode(),
+            signature_payload.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Compare signatures
+        return hmac.compare_digest(computed, signature)
+        
+    except Exception as e:
+        logger.error(f"Error verifying webhook signature: {str(e)}", exc_info=True)
+        return False
 
 # Run the FastAPI webhook server
 def run_webhook_server():
