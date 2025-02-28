@@ -142,7 +142,7 @@ def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> 
         logger.error(f"Error verifying webhook signature: {str(e)}", exc_info=True)
         return False
 
-@app.post("/webhook")
+@app.post("/webhook/transaction")
 async def transaction_webhook(request: Request):
     """Handle incoming transaction webhooks from Blockfrost"""
     try:
