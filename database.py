@@ -270,6 +270,35 @@ class Database:
         finally:
             session.close()
 
+    def remove_tracker(self, policy_id, channel_id):
+        """Remove a specific token tracker"""
+        session = self.Session()
+        try:
+            # Convert channel_id to int to ensure consistent type
+            channel_id = int(channel_id)
+            
+            # Find and delete the tracker
+            tracker = session.query(TokenTracker).filter_by(
+                policy_id=policy_id,
+                channel_id=channel_id
+            ).first()
+            
+            if tracker:
+                session.delete(tracker)
+                session.commit()
+                logger.info(f"Removed tracker for policy_id {policy_id} in channel {channel_id}")
+                return True
+            else:
+                logger.warning(f"No tracker found for policy_id {policy_id} in channel {channel_id}")
+                return False
+                
+        except SQLAlchemyError as e:
+            logger.error(f"Database error while removing token tracker: {str(e)}", exc_info=True)
+            session.rollback()
+            return False
+        finally:
+            session.close()
+
 # Create database instance
 database = Database()
 
