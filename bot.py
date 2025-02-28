@@ -20,6 +20,7 @@ import uvicorn
 import threading
 import time
 from transaction_analysis import analyze_transaction_improved
+from notifications import send_transaction_notification
 
 # Load environment variables
 load_dotenv()
@@ -398,165 +399,6 @@ class TokenTracker:
         """Increment the transfer notifications counter"""
         self.transfer_notifications += 1
 
-async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
-    """Send a notification about a transaction to the appropriate Discord channel"""
-    try:
-        # For transfers, check if we should track them
-        if tx_type == 'wallet_transfer' and not tracker.track_transfers:
-            logger.info("Transfer tracking disabled, skipping notification")
-            return
-
-        # Get decimals for threshold comparison
-        decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
-        human_readable_amount = token_amount
-        
-        # Check if the token amount meets the threshold
-        if human_readable_amount < tracker.threshold:
-            logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}, skipping notification")
-            return
-            
-        # Try to get the channel from cache first
-        channel = bot.get_channel(tracker.channel_id)
-        
-        # If not in cache, try to find it in guilds
-        if not channel:
-            # Log all guilds and channels for debugging
-            logger.info(f"Bot is in {len(bot.guilds)} guilds")
-            for guild in bot.guilds:
-                logger.info(f"Checking guild: {guild.name} (ID: {guild.id})")
-                logger.info(f"Guild channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
-                channel = guild.get_channel(tracker.channel_id)
-                if channel:
-                    logger.info(f"Found channel {channel.name} in guild {guild.name}")
-                    break
-                    
-        if not channel:
-            logger.error(f"Channel {tracker.channel_id} not found in any guild - skipping notification but keeping tracker")
-            return
-            
-        # Create appropriate embed based on transaction type
-        if tx_type in ['buy', 'sell']:
-            # Create trade embed
-            embed = await create_trade_embed(details, tracker.policy_id, ada_amount, token_amount, tracker, details)
-            if embed:
-                try:
-                    await channel.send(embed=embed)
-                    tracker.increment_trade_notifications()
-                except discord.Forbidden:
-                    logger.error(f"Bot does not have permission to send messages in channel {tracker.channel_id}")
-                except Exception as e:
-                    logger.error(f"Error sending trade notification to channel {tracker.channel_id}: {str(e)}")
-        elif tx_type == 'wallet_transfer' and tracker.track_transfers:
-            # Create transfer embed
-            embed = await create_transfer_embed(details, tracker.policy_id, token_amount, tracker)
-            if embed:
-                try:
-                    await channel.send(embed=embed)
-                    tracker.increment_transfer_notifications()
-                except discord.Forbidden:
-                    logger.error(f"Bot does not have permission to send messages in channel {tracker.channel_id}")
-                except Exception as e:
-                    logger.error(f"Error sending transfer notification to channel {tracker.channel_id}: {str(e)}")
-                    
-    except Exception as e:
-        logger.error(f"Error sending notification: {str(e)}", exc_info=True)
-
-def get_token_info(policy_id: str):
-    """Get token information including metadata and decimals"""
-    try:
-        # Get all assets under this policy
-        assets = api.assets_policy(policy_id)
-        if isinstance(assets, Exception):
-            raise assets
-            
-        if not assets:
-            return None
-            
-        # Get the first asset (main token)
-        asset = assets[0]
-        
-        # Get detailed metadata for the asset
-        metadata = api.asset(asset.asset)
-        if isinstance(metadata, Exception):
-            raise metadata
-            
-        # Convert Namespace objects to dictionaries
-        def namespace_to_dict(obj):
-            if hasattr(obj, '__dict__'):
-                return {k: namespace_to_dict(v) for k, v in vars(obj).items()}
-            elif isinstance(obj, (list, tuple)):
-                return [namespace_to_dict(x) for x in obj]
-            elif isinstance(obj, dict):
-                return {k: namespace_to_dict(v) for k, v in obj.items()}
-            else:
-                return obj
-                
-        # Convert metadata to dictionary
-        metadata_dict = namespace_to_dict(metadata)
-        
-        # Get onchain metadata if available
-        onchain_metadata = metadata_dict.get('onchain_metadata', {})
-        
-        # Try to get decimals from various sources
-        decimals = None
-        
-        # Check onchain metadata first (CIP-67 standard)
-        if onchain_metadata and isinstance(onchain_metadata, dict):
-            decimals = onchain_metadata.get('decimals')
-            
-        # If not found, check asset metadata
-        if decimals is None and 'metadata' in metadata_dict:
-            decimals = metadata_dict['metadata'].get('decimals')
-            
-        # Default to 0 if no decimal information found
-        if decimals is None:
-            decimals = 0
-            logger.info(f"No decimal information found for {asset.asset}, defaulting to 0")
-        else:
-            logger.info(f"Found {decimals} decimals for {asset.asset}")
-            
-        return {
-            'asset': asset.asset,
-            'policy_id': policy_id,
-            'name': metadata_dict.get('asset_name'),
-            'decimals': int(decimals),
-            'metadata': onchain_metadata
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting token info: {str(e)}", exc_info=True)
-        return None
-
-def format_token_amount(amount: int, decimals: int) -> str:
-    """Format token amount considering decimals"""
-    if decimals == 0:
-        return f"{amount:,}"
-    
-    # Convert to float and divide by 10^decimals
-    formatted = amount / (10 ** decimals)
-    
-    # Format with appropriate decimal places
-    if decimals <= 2:
-        return f"{formatted:,.{decimals}f}"
-    elif formatted >= 1000:
-        return f"{formatted:,.2f}"
-    else:
-        return f"{formatted:,.{min(decimals, 6)}f}"
-
-def get_transaction_details(api: BlockFrostApi, tx_hash: str):
-    try:
-        logger.info(f"Fetching transaction details for tx_hash: {tx_hash}")
-        # Get detailed transaction information
-        tx = api.transaction(hash=tx_hash)
-        utxos = api.transaction_utxos(hash=tx_hash)
-        return {**tx.model_dump(), **utxos.model_dump()}
-    except ApiError as e:
-        logger.error(f"Blockfrost API error while fetching transaction details: {str(e)}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error in get_transaction_details: {str(e)}", exc_info=True)
-        return None
-
 async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tracker, analysis_details):
     """Creates a detailed embed for DEX trades with transaction information"""
     try:
@@ -750,11 +592,101 @@ async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
         logger.error(f"Error creating transfer embed: {str(e)}", exc_info=True)
         return None
 
-def shorten_address(address):
-    """Shortens a Cardano address for display"""
-    if not address:
-        return "Unknown"
-    return address[:8] + "..." + address[-4:] if len(address) > 12 else address
+def get_token_info(policy_id: str):
+    """Get token information including metadata and decimals"""
+    try:
+        # Get all assets under this policy
+        assets = api.assets_policy(policy_id)
+        if isinstance(assets, Exception):
+            raise assets
+            
+        if not assets:
+            return None
+            
+        # Get the first asset (main token)
+        asset = assets[0]
+        
+        # Get detailed metadata for the asset
+        metadata = api.asset(asset.asset)
+        if isinstance(metadata, Exception):
+            raise metadata
+            
+        # Convert Namespace objects to dictionaries
+        def namespace_to_dict(obj):
+            if hasattr(obj, '__dict__'):
+                return {k: namespace_to_dict(v) for k, v in vars(obj).items()}
+            elif isinstance(obj, (list, tuple)):
+                return [namespace_to_dict(x) for x in obj]
+            elif isinstance(obj, dict):
+                return {k: namespace_to_dict(v) for k, v in obj.items()}
+            else:
+                return obj
+                
+        # Convert metadata to dictionary
+        metadata_dict = namespace_to_dict(metadata)
+        
+        # Get onchain metadata if available
+        onchain_metadata = metadata_dict.get('onchain_metadata', {})
+        
+        # Try to get decimals from various sources
+        decimals = None
+        
+        # Check onchain metadata first (CIP-67 standard)
+        if onchain_metadata and isinstance(onchain_metadata, dict):
+            decimals = onchain_metadata.get('decimals')
+            
+        # If not found, check asset metadata
+        if decimals is None and 'metadata' in metadata_dict:
+            decimals = metadata_dict['metadata'].get('decimals')
+            
+        # Default to 0 if no decimal information found
+        if decimals is None:
+            decimals = 0
+            logger.info(f"No decimal information found for {asset.asset}, defaulting to 0")
+        else:
+            logger.info(f"Found {decimals} decimals for {asset.asset}")
+            
+        return {
+            'asset': asset.asset,
+            'policy_id': policy_id,
+            'name': metadata_dict.get('asset_name'),
+            'decimals': int(decimals),
+            'metadata': onchain_metadata
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting token info: {str(e)}", exc_info=True)
+        return None
+
+def format_token_amount(amount: int, decimals: int) -> str:
+    """Format token amount considering decimals"""
+    if decimals == 0:
+        return f"{amount:,}"
+    
+    # Convert to float and divide by 10^decimals
+    formatted = amount / (10 ** decimals)
+    
+    # Format with appropriate decimal places
+    if decimals <= 2:
+        return f"{formatted:,.{decimals}f}"
+    elif formatted >= 1000:
+        return f"{formatted:,.2f}"
+    else:
+        return f"{formatted:,.{min(decimals, 6)}f}"
+
+def get_transaction_details(api: BlockFrostApi, tx_hash: str):
+    try:
+        logger.info(f"Fetching transaction details for tx_hash: {tx_hash}")
+        # Get detailed transaction information
+        tx = api.transaction(hash=tx_hash)
+        utxos = api.transaction_utxos(hash=tx_hash)
+        return {**tx.model_dump(), **utxos.model_dump()}
+    except ApiError as e:
+        logger.error(f"Blockfrost API error while fetching transaction details: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in get_transaction_details: {str(e)}", exc_info=True)
+        return None
 
 class TokenControls(discord.ui.View):
     def __init__(self, policy_id):
