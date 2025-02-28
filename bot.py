@@ -315,8 +315,32 @@ async def on_ready():
         trackers = database.get_trackers()
         logger.info(f"Loading {len(trackers)} trackers from database")
         
+        # Log all guilds and channels the bot can see
+        logger.info("=== Bot Access Report ===")
+        for guild in bot.guilds:
+            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
+            logger.info("Channels in this guild:")
+            for channel in guild.channels:
+                perms = channel.permissions_for(guild.me)
+                can_send = perms.send_messages
+                can_embed = perms.embed_links
+                logger.info(f"- {channel.name} (ID: {channel.id})")
+                logger.info(f"  Permissions: send_messages={can_send}, embed_links={can_embed}")
+        
+        # Now load trackers and verify channel access
         for tracker in trackers:
             try:
+                # Test channel access
+                channel = bot.get_channel(int(tracker.channel_id))
+                if channel:
+                    logger.info(f"✅ Found channel for {tracker.token_name}: {channel.name} (ID: {channel.id})")
+                    # Check permissions
+                    perms = channel.permissions_for(channel.guild.me)
+                    if not perms.send_messages or not perms.embed_links:
+                        logger.error(f"❌ Missing permissions in channel {channel.name}: send_messages={perms.send_messages}, embed_links={perms.embed_links}")
+                else:
+                    logger.error(f"❌ Could not find channel {tracker.channel_id} for {tracker.token_name}")
+                
                 # Convert database model to TokenTracker object
                 active_trackers[tracker.policy_id] = TokenTracker(
                     policy_id=tracker.policy_id,
