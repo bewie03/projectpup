@@ -68,6 +68,9 @@ class Database:
         session = self.Session()
         try:
             trackers = session.query(TokenTracker).all()
+            # Ensure channel_ids are integers
+            for tracker in trackers:
+                tracker.channel_id = int(tracker.channel_id)
             return trackers
         except SQLAlchemyError as e:
             logger.error(f"Database error while retrieving token trackers: {str(e)}", exc_info=True)
@@ -83,6 +86,8 @@ class Database:
                 policy_id=policy_id,
                 channel_id=channel_id
             ).first()
+            if tracker:
+                tracker.channel_id = int(tracker.channel_id)
             return tracker
         except SQLAlchemyError as e:
             logger.error(f"Database error while retrieving token tracker: {str(e)}", exc_info=True)
@@ -255,6 +260,9 @@ class Database:
         try:
             session = self.Session()
             trackers = session.query(TokenTracker).all()
+            # Ensure channel_ids are integers
+            for tracker in trackers:
+                tracker.channel_id = int(tracker.channel_id)
             return trackers
         except SQLAlchemyError as e:
             logger.error(f"Error retrieving token trackers: {str(e)}")
