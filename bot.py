@@ -87,8 +87,7 @@ is_ready = asyncio.Event()
 async def on_ready():
     """Called when the bot is ready"""
     try:
-        # Set the ready event
-        is_ready.set()
+        logger.info(f"Bot {bot.user.name} is starting up...")
         
         # Wait for guilds to be chunked and ready
         logger.info("Waiting for guilds to be ready...")
@@ -100,6 +99,12 @@ async def on_ready():
                 logger.info(f"Chunking guild: {guild.name}")
                 await guild.chunk()
                 
+        # Log guild information
+        for guild in bot.guilds:
+            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
+            channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
+            logger.info(f"Available text channels: {[f'{c.name} (ID: {c.id})' for c in channels]}")
+        
         # Load all trackers from database
         trackers = database.get_trackers()
         logger.info(f"Loading {len(trackers)} trackers from database")
@@ -110,17 +115,23 @@ async def on_ready():
                 channel_id = int(tracker.channel_id)  # Ensure it's an int
                 key = get_tracker_key(tracker.policy_id, channel_id)
                 
-                # Verify channel exists before creating tracker
+                # Verify channel exists and is accessible
                 channel_found = False
                 for guild in bot.guilds:
                     channel = guild.get_channel(channel_id)
                     if channel:
+                        # Verify bot has permission to send messages
+                        permissions = channel.permissions_for(guild.me)
+                        if not permissions.send_messages:
+                            logger.error(f"Bot lacks permission to send messages in channel {channel_id}")
+                            continue
+                        
                         channel_found = True
                         logger.info(f"Verified channel {channel_id} exists in guild {guild.name}")
                         break
                 
                 if not channel_found:
-                    logger.warning(f"Channel {channel_id} not found in any guild, skipping tracker")
+                    logger.warning(f"Channel {channel_id} not found in any guild or lacks permissions, skipping tracker")
                     continue
                 
                 active_trackers[key] = TokenTracker(
@@ -140,17 +151,19 @@ async def on_ready():
                 logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
                 
         # Sync slash commands
-        await bot.tree.sync()
+        try:
+            await bot.tree.sync()
+            logger.info("Successfully synced slash commands")
+        except Exception as e:
+            logger.error(f"Failed to sync slash commands: {str(e)}")
+        
+        # Set the ready event to indicate bot is fully initialized
+        is_ready.set()
         logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
         
-        # Log guild information
-        for guild in bot.guilds:
-            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
-            channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
-            logger.info(f"Available text channels: {[f'{c.name} (ID: {c.id})' for c in channels]}")
-            
     except Exception as e:
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
+        # Don't set ready event if initialization failed
 
 @bot.event
 async def on_disconnect():
@@ -230,6 +243,16 @@ def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> 
 async def transaction_webhook(request: Request):
     """Handle incoming transaction webhooks from Blockfrost"""
     try:
+        # Check if bot is ready
+        if not is_ready.is_set():
+            logger.warning("Bot is not ready, waiting for connection...")
+            try:
+                # Wait up to 30 seconds for bot to be ready
+                await asyncio.wait_for(is_ready.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.error("Timeout waiting for bot to be ready")
+                raise HTTPException(status_code=503, detail="Bot not ready")
+        
         # Log webhook received
         logger.info("Received webhook request")
         
@@ -289,92 +312,115 @@ async def transaction_webhook(request: Request):
             logger.info(f"Checking {len(trackers)} tracked tokens")
             
             for db_tracker in trackers:
-                # Check inputs and outputs for our policy ID
-                is_involved = False
-                
-                # Get the active tracker from memory
-                key = get_tracker_key(db_tracker.policy_id, int(db_tracker.channel_id))
-                tracker = active_trackers.get(key)
-                
-                if not tracker:
-                    logger.warning(f"Tracker {key} found in database but not in memory, reloading...")
-                    try:
-                        tracker = TokenTracker(
-                            policy_id=db_tracker.policy_id,
-                            channel_id=int(db_tracker.channel_id),
-                            token_name=db_tracker.token_name,
-                            image_url=db_tracker.image_url,
-                            threshold=db_tracker.threshold,
-                            track_transfers=db_tracker.track_transfers,
-                            last_block=db_tracker.last_block,
-                            trade_notifications=db_tracker.trade_notifications,
-                            transfer_notifications=db_tracker.transfer_notifications,
-                            token_info=db_tracker.token_info
-                        )
-                        active_trackers[key] = tracker
-                    except Exception as e:
-                        logger.error(f"Failed to reload tracker {key}: {str(e)}")
-                        continue
-                
-                # Check inputs
-                input_addresses = []
-                for inp in inputs:
-                    input_addresses.append(inp.get('address', ''))
-                    for amt in inp.get('amount', []):
-                        unit = amt.get('unit', '')
-                        # Debug log the unit we're checking
-                        logger.debug(f"Checking input unit: {unit}")
-                        
-                        # Only check policy ID in webhook handler
-                        if unit.startswith(tracker.policy_id):
-                            is_involved = True
-                            logger.info(f"Found token {tracker.token_name} in transaction inputs")
-                            break
-                    if is_involved:
-                        break
-                        
-                # Check outputs if not found in inputs
-                if not is_involved:
-                    output_addresses = []
-                    for out in outputs:
-                        output_addresses.append(out.get('address', ''))
-                        for amt in out.get('amount', []):
+                try:
+                    # Check inputs and outputs for our policy ID
+                    is_involved = False
+                    
+                    # Get the active tracker from memory
+                    key = get_tracker_key(db_tracker.policy_id, int(db_tracker.channel_id))
+                    tracker = active_trackers.get(key)
+                    
+                    if not tracker:
+                        logger.warning(f"Tracker {key} found in database but not in memory, reloading...")
+                        try:
+                            # Verify channel exists and is accessible before creating tracker
+                            channel_id = int(db_tracker.channel_id)
+                            channel = None
+                            
+                            for guild in bot.guilds:
+                                channel = guild.get_channel(channel_id)
+                                if channel:
+                                    # Verify bot has permission to send messages
+                                    permissions = channel.permissions_for(guild.me)
+                                    if not permissions.send_messages:
+                                        logger.error(f"Bot lacks permission to send messages in channel {channel_id}")
+                                        continue
+                                    break
+                            
+                            if not channel:
+                                logger.error(f"Channel {channel_id} not found or inaccessible")
+                                continue
+                                
+                            tracker = TokenTracker(
+                                policy_id=db_tracker.policy_id,
+                                channel_id=channel_id,
+                                token_name=db_tracker.token_name,
+                                image_url=db_tracker.image_url,
+                                threshold=db_tracker.threshold,
+                                track_transfers=db_tracker.track_transfers,
+                                last_block=db_tracker.last_block,
+                                trade_notifications=db_tracker.trade_notifications,
+                                transfer_notifications=db_tracker.transfer_notifications,
+                                token_info=db_tracker.token_info
+                            )
+                            active_trackers[key] = tracker
+                            logger.info(f"Successfully reloaded tracker for channel {channel_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to reload tracker {key}: {str(e)}")
+                            continue
+                    
+                    # Check inputs
+                    input_addresses = []
+                    for inp in inputs:
+                        input_addresses.append(inp.get('address', ''))
+                        for amt in inp.get('amount', []):
                             unit = amt.get('unit', '')
                             # Debug log the unit we're checking
-                            logger.debug(f"Checking output unit: {unit}")
+                            logger.debug(f"Checking input unit: {unit}")
                             
                             # Only check policy ID in webhook handler
                             if unit.startswith(tracker.policy_id):
                                 is_involved = True
-                                logger.info(f"Found token {tracker.token_name} in transaction outputs")
+                                logger.info(f"Found token {tracker.token_name} in transaction inputs")
                                 break
                         if is_involved:
                             break
-                
-                if is_involved:
-                    # Log token involvement
-                    logger.info(f"Analyzing transaction for {tracker.token_name} ({tracker.policy_id})")
+                            
+                    # Check outputs if not found in inputs
+                    if not is_involved:
+                        output_addresses = []
+                        for out in outputs:
+                            output_addresses.append(out.get('address', ''))
+                            for amt in out.get('amount', []):
+                                unit = amt.get('unit', '')
+                                # Debug log the unit we're checking
+                                logger.debug(f"Checking output unit: {unit}")
+                                
+                                # Only check policy ID in webhook handler
+                                if unit.startswith(tracker.policy_id):
+                                    is_involved = True
+                                    logger.info(f"Found token {tracker.token_name} in transaction outputs")
+                                    break
+                            if is_involved:
+                                break
                     
-                    # Create transaction data structure for analysis
-                    analysis_data = {
-                        'inputs': inputs,
-                        'outputs': outputs,
-                        'tx': tx
-                    }
-                    
-                    # Analyze the transaction
-                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, tracker.policy_id)
-                    
-                    # Add transaction hash to details
-                    details['hash'] = tx_hash
-                    
-                    # Log analysis results
-                    logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
-                    
-                    # Send notification
-                    await send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details)
-                else:
-                    logger.debug(f"Token {tracker.token_name} not involved in transaction {tx_hash}")
+                    if is_involved:
+                        # Log token involvement
+                        logger.info(f"Analyzing transaction for {tracker.token_name} ({tracker.policy_id})")
+                        
+                        # Create transaction data structure for analysis
+                        analysis_data = {
+                            'inputs': inputs,
+                            'outputs': outputs,
+                            'tx': tx
+                        }
+                        
+                        # Analyze the transaction
+                        tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, tracker.policy_id)
+                        
+                        # Add transaction hash to details
+                        details['hash'] = tx_hash
+                        
+                        # Log analysis results
+                        logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
+                        
+                        # Send notification
+                        await send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details)
+                    else:
+                        logger.debug(f"Token {tracker.token_name} not involved in transaction {tx_hash}")
+                except Exception as e:
+                    logger.error(f"Error processing tracker {db_tracker.policy_id}: {str(e)}", exc_info=True)
+                    continue
         
         return {"status": "ok"}
         
@@ -1499,7 +1545,7 @@ def run_webhook_server():
     """Run the FastAPI webhook server"""
     port = int(os.getenv("PORT", 8000))
     
-    # Configure uvicorn to bind quickly
+    # Configure uvicorn to run in thread mode
     config = uvicorn.Config(
         app=app,
         host="0.0.0.0",
@@ -1510,8 +1556,16 @@ def run_webhook_server():
         timeout_graceful_shutdown=10
     )
     server = uvicorn.Server(config)
-    server.run()
+    
+    # Run server in a separate thread
+    server_thread = threading.Thread(target=server.run, daemon=True)
+    server_thread.start()
+    logger.info(f"Webhook server started on port {port}")
 
-# Run the bot
+# Run the bot and webhook server
 if __name__ == "__main__":
+    # Start webhook server in background thread
+    run_webhook_server()
+    
+    # Run Discord bot in main thread
     bot.run(os.getenv('DISCORD_TOKEN'))
