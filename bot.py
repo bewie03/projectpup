@@ -78,7 +78,12 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True  # Required to access guild information
 intents.guild_messages = True  # Required to send messages in guilds
+intents.members = True  # Required to access member information
+intents.message_content = True  # Required to read message content
 bot = commands.Bot(command_prefix='/', intents=intents)
+
+# Enable member caching for all guilds
+bot.chunk_guilds_at_startup = True  # Enable member caching at startup
 
 # Initialize Blockfrost API
 api = BlockFrostApi(
@@ -199,9 +204,33 @@ async def transaction_webhook(request: Request):
             trackers = database.get_trackers()
             logger.info(f"Checking {len(trackers)} tracked tokens")
             
-            for tracker in trackers:
+            for db_tracker in trackers:
                 # Check inputs and outputs for our policy ID
                 is_involved = False
+                
+                # Get the active tracker from memory
+                key = get_tracker_key(db_tracker.policy_id, int(db_tracker.channel_id))
+                tracker = active_trackers.get(key)
+                
+                if not tracker:
+                    logger.warning(f"Tracker {key} found in database but not in memory, reloading...")
+                    try:
+                        tracker = TokenTracker(
+                            policy_id=db_tracker.policy_id,
+                            channel_id=int(db_tracker.channel_id),
+                            token_name=db_tracker.token_name,
+                            image_url=db_tracker.image_url,
+                            threshold=db_tracker.threshold,
+                            track_transfers=db_tracker.track_transfers,
+                            last_block=db_tracker.last_block,
+                            trade_notifications=db_tracker.trade_notifications,
+                            transfer_notifications=db_tracker.transfer_notifications,
+                            token_info=db_tracker.token_info
+                        )
+                        active_trackers[key] = tracker
+                    except Exception as e:
+                        logger.error(f"Failed to reload tracker {key}: {str(e)}")
+                        continue
                 
                 # Check inputs
                 input_addresses = []
@@ -277,6 +306,11 @@ def run_webhook_server():
 async def on_ready():
     """Called when the bot is ready"""
     try:
+        # Wait for guilds to be chunked
+        logger.info("Waiting for guilds to be ready...")
+        if bot.chunk_guilds_at_startup:
+            await bot.wait_until_ready()
+        
         # Load all trackers from database
         trackers = database.get_trackers()
         logger.info(f"Loading {len(trackers)} trackers from database")
@@ -284,9 +318,12 @@ async def on_ready():
         for tracker in trackers:
             try:
                 # Convert database model to TokenTracker object
-                active_trackers[tracker.policy_id] = TokenTracker(
+                channel_id = int(tracker.channel_id)  # Ensure it's an int
+                key = get_tracker_key(tracker.policy_id, channel_id)
+                
+                active_trackers[key] = TokenTracker(
                     policy_id=tracker.policy_id,
-                    channel_id=int(tracker.channel_id),  # Ensure it's an int
+                    channel_id=channel_id,
                     token_name=tracker.token_name,
                     image_url=tracker.image_url,
                     threshold=tracker.threshold,
@@ -296,7 +333,7 @@ async def on_ready():
                     transfer_notifications=tracker.transfer_notifications,
                     token_info=tracker.token_info
                 )
-                logger.info(f"Loaded tracker for {tracker.token_name} in channel {tracker.channel_id}")
+                logger.info(f"Loaded tracker for {tracker.token_name} in channel {channel_id}")
             except Exception as e:
                 logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
                 
@@ -312,8 +349,12 @@ async def on_ready():
     except Exception as e:
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
 
-# Store active tracking configurations
+# Store active tracking configurations using composite key
 active_trackers = {}
+
+def get_tracker_key(policy_id: str, channel_id: int) -> str:
+    """Generate a unique key for a tracker"""
+    return f"{policy_id}:{channel_id}"
 
 class TokenTracker:
     def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
@@ -367,15 +408,36 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
             logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}, skipping notification")
             return
             
+        # Log attempt to find channel
+        logger.info(f"Attempting to find channel {tracker.channel_id}")
+        
         # Try to get the channel from cache first
         channel = bot.get_channel(tracker.channel_id)
         
-        # If not in cache, try to find it in guilds
+        # If not in cache, try to fetch it directly
         if not channel:
-            for guild in bot.guilds:
-                channel = guild.get_channel(tracker.channel_id)
-                if channel:
-                    break
+            try:
+                channel = await bot.fetch_channel(tracker.channel_id)
+                logger.info(f"Successfully fetched channel {tracker.channel_id} directly")
+            except discord.NotFound:
+                logger.error(f"Channel {tracker.channel_id} does not exist")
+                return
+            except discord.Forbidden:
+                logger.error(f"Bot does not have permission to access channel {tracker.channel_id}")
+                return
+            except Exception as e:
+                logger.error(f"Error fetching channel {tracker.channel_id}: {str(e)}")
+                
+                # As a last resort, try searching through guilds
+                for guild in bot.guilds:
+                    try:
+                        channel = guild.get_channel(tracker.channel_id)
+                        if channel:
+                            logger.info(f"Found channel {tracker.channel_id} in guild {guild.name}")
+                            break
+                    except Exception as e:
+                        logger.error(f"Error searching for channel in guild {guild.name}: {str(e)}")
+                        continue
                     
         if not channel:
             logger.error(f"Channel {tracker.channel_id} not found in any guild")
@@ -389,6 +451,7 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                 try:
                     await channel.send(embed=embed)
                     tracker.increment_trade_notifications()
+                    logger.info(f"Successfully sent trade notification to channel {tracker.channel_id}")
                 except discord.Forbidden:
                     logger.error(f"Bot does not have permission to send messages in channel {tracker.channel_id}")
                 except Exception as e:
@@ -400,13 +463,14 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                 try:
                     await channel.send(embed=embed)
                     tracker.increment_transfer_notifications()
+                    logger.info(f"Successfully sent transfer notification to channel {tracker.channel_id}")
                 except discord.Forbidden:
                     logger.error(f"Bot does not have permission to send messages in channel {tracker.channel_id}")
                 except Exception as e:
                     logger.error(f"Error sending transfer notification to channel {tracker.channel_id}: {str(e)}")
                 
     except Exception as e:
-        logger.error(f"Error sending transaction notification: {str(e)}", exc_info=True)
+        logger.error(f"Error in send_transaction_notification: {str(e)}", exc_info=True)
 
 def get_token_info(policy_id: str):
     """Get token information including metadata and decimals"""
@@ -852,12 +916,14 @@ class TokenControls(discord.ui.View):
     @discord.ui.button(label="Stop Tracking", style=discord.ButtonStyle.danger, emoji="⛔")
     async def stop_tracking(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            if self.policy_id in active_trackers:
+            # Get tracker key using composite key
+            tracker_key = get_tracker_key(self.policy_id, interaction.channel_id)
+            if tracker_key in active_trackers:
                 # Remove from database
                 database.delete_token_tracker(self.policy_id, interaction.channel_id)
                 
-                # Remove from active trackers
-                del active_trackers[self.policy_id]
+                # Remove from active trackers using composite key
+                del active_trackers[tracker_key]
             
                 # Update message
                 embed = discord.Embed(
@@ -871,7 +937,7 @@ class TokenControls(discord.ui.View):
                     child.disabled = True
                 
                 await interaction.response.edit_message(embed=embed, view=self)
-                logger.info(f"Stopped tracking token: {self.policy_id}")
+                logger.info(f"Stopped tracking token with key: {tracker_key}")
             else:
                 await interaction.response.send_message("Not tracking this token anymore.", ephemeral=True)
                 
@@ -882,8 +948,9 @@ class TokenControls(discord.ui.View):
     @discord.ui.button(label="Toggle Transfers", style=discord.ButtonStyle.primary, emoji="🔄")
     async def toggle_transfers(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            # Get the tracker
-            tracker = active_trackers.get(self.policy_id)
+            # Get tracker using composite key
+            tracker_key = get_tracker_key(self.policy_id, interaction.channel_id)
+            tracker = active_trackers.get(tracker_key)
             if not tracker:
                 await interaction.response.send_message("❌ Token tracker not found.", ephemeral=True)
                 return
@@ -1101,7 +1168,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             await interaction.response.send_message(embed=embed, view=view)
             
             # Save to memory and database
-            active_trackers[tracker.policy_id] = tracker
+            active_trackers[get_tracker_key(tracker.policy_id, tracker.channel_id)] = tracker
             
             logger.info(f"Started tracking token: {tracker.token_name} ({tracker.policy_id})")
                 
@@ -1219,8 +1286,12 @@ async def help_command(interaction: discord.Interaction):
 async def status_command(interaction: discord.Interaction):
     """Show status of tracked tokens in this channel"""
     try:
-        # Get all trackers for this channel
-        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
+        # Get all trackers for this channel using composite keys
+        channel_trackers = []
+        for key, tracker in active_trackers.items():
+            if tracker.channel_id == interaction.channel_id:
+                channel_trackers.append(tracker)
+                
         if not channel_trackers:
             embed = discord.Embed(
                 title="❌ No Active Trackers",
@@ -1294,8 +1365,12 @@ async def status_command(interaction: discord.Interaction):
 async def stop(interaction: discord.Interaction):
     """Stop tracking all tokens in this channel"""
     try:
-        # Check if there are any trackers for this channel
-        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
+        # Get all trackers for this channel using composite keys
+        channel_trackers = []
+        for key, tracker in active_trackers.items():
+            if tracker.channel_id == interaction.channel_id:
+                channel_trackers.append(tracker)
+                
         if not channel_trackers:
             await interaction.response.send_message("No tokens are being tracked in this channel.", ephemeral=True)
             return
@@ -1323,50 +1398,54 @@ async def stop(interaction: discord.Interaction):
                     # Remove from database
                     database.remove_all_trackers_for_channel(interaction.channel_id)
         
-                    # Remove from active trackers
-                    policies_to_remove = []
-                    for policy_id, tracker in active_trackers.items():
+                    # Remove from active trackers using composite keys
+                    keys_to_remove = []
+                    for key, tracker in active_trackers.items():
                         if tracker.channel_id == interaction.channel_id:
-                            policies_to_remove.append(policy_id)
+                            keys_to_remove.append(key)
                     
-                    for policy_id in policies_to_remove:
-                        del active_trackers[policy_id]
-
-                    # Disable buttons
-                    for child in self.children:
-                        child.disabled = True
+                    for key in keys_to_remove:
+                        del active_trackers[key]
+                        logger.info(f"Removed tracker with key {key}")
                     
-                    # Update message
+                    # Update embed to show success
                     embed = discord.Embed(
                         title="✅ Token Tracking Stopped",
                         description="Successfully stopped tracking all tokens in this channel.",
                         color=discord.Color.green()
                     )
-                    await interaction.response.edit_message(embed=embed, view=self)
+                    await interaction.response.edit_message(embed=embed, view=None)
+                    
                 except Exception as e:
                     logger.error(f"Error stopping token tracking: {str(e)}", exc_info=True)
-                    await interaction.response.send_message("Failed to stop token tracking. Please try again.", ephemeral=True)
+                    error_embed = discord.Embed(
+                        title="❌ Error",
+                        description="Failed to stop token tracking.",
+                        color=discord.Color.red()
+                    )
+                    await interaction.response.edit_message(embed=error_embed, view=None)
 
             @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
             async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-                # Disable buttons
-                for child in self.children:
-                    child.disabled = True
-                
-                # Update message
+                """Cancel the stop operation"""
                 embed = discord.Embed(
                     title="❌ Operation Cancelled",
                     description="Token tracking will continue.",
                     color=discord.Color.red()
                 )
-                await interaction.response.edit_message(embed=embed, view=self)
+                await interaction.response.edit_message(embed=embed, view=None)
 
         # Send confirmation message
-        await interaction.response.send_message(embed=embed, view=ConfirmView())
-
+        await interaction.response.send_message(embed=embed, view=ConfirmView(), ephemeral=True)
+        
     except Exception as e:
         logger.error(f"Error in stop command: {str(e)}", exc_info=True)
-        await interaction.response.send_message("Failed to process stop command. Please try again.", ephemeral=True)
+        error_embed = discord.Embed(
+            title="❌ Error",
+            description="Failed to process stop command.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
 # Run the bot
 if __name__ == "__main__":
