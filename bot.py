@@ -19,6 +19,8 @@ import hashlib
 import uvicorn
 import threading
 import time
+import queue
+from queue import Queue
 
 # Load environment variables
 load_dotenv()
@@ -63,6 +65,8 @@ logger = setup_logging()
 
 # Initialize FastAPI app
 app = FastAPI()
+# Create a thread-safe queue for notifications
+notification_queue = Queue()
 
 # Add CORS middleware
 app.add_middleware(
@@ -267,16 +271,45 @@ async def transaction_webhook(request: Request):
                     # Log analysis results
                     logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
                     
-                    # Send notification
-                    await send_transaction_notification(active_tracker, tx_type, ada_amount, token_amount, details)
-                else:
-                    logger.debug(f"Token {active_tracker.token_name} not involved in transaction {tx_hash}")
-        
-        return {"status": "ok"}
+                    # Instead of trying to send notification directly, add to queue
+                    notification_data = {
+                        'tx_details': tx_details,
+                        'policy_id': policy_id,
+                        'ada_amount': ada_amount,
+                        'token_amount': token_amount,
+                        'analysis_details': analysis_details,
+                        'tracker': tracker
+                    }
+                    notification_queue.put(notification_data)
+                    
+        return {"status": "success", "message": "Notification queued"}
         
     except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
+        logger.error(f"Error in webhook: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@tasks.loop(seconds=1)
+async def process_notification_queue():
+    """Process any pending notifications in the queue"""
+    try:
+        while not notification_queue.empty():
+            data = notification_queue.get_nowait()
+            
+            # Extract data
+            tx_details = data['tx_details']
+            policy_id = data['policy_id']
+            ada_amount = data['ada_amount']
+            token_amount = data['token_amount']
+            analysis_details = data['analysis_details']
+            tracker = data['tracker']
+            
+            # Send the notification
+            await send_transaction_notification(tracker, analysis_details['type'], 
+                                             ada_amount, token_amount, analysis_details)
+            
+            notification_queue.task_done()
+    except Exception as e:
+        logger.error(f"Error processing notification queue: {str(e)}")
 
 def run_webhook_server():
     """Run the FastAPI webhook server"""
@@ -286,6 +319,9 @@ def run_webhook_server():
 async def on_ready():
     """Called when the bot is ready"""
     try:
+        # Start the notification queue processor
+        process_notification_queue.start()
+        
         # Load all trackers from database
         trackers = database.get_trackers()
         logger.info(f"Loading {len(trackers)} trackers from database")
@@ -1387,4 +1423,5 @@ async def stop(interaction: discord.Interaction):
 
 # Run the bot
 if __name__ == "__main__":
+    threading.Thread(target=run_webhook_server).start()
     bot.run(os.getenv('DISCORD_TOKEN'))
