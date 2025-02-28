@@ -306,11 +306,16 @@ def run_webhook_server():
 async def on_ready():
     """Called when the bot is ready"""
     try:
-        # Wait for guilds to be chunked
+        # Wait for guilds to be chunked and ready
         logger.info("Waiting for guilds to be ready...")
-        if bot.chunk_guilds_at_startup:
-            await bot.wait_until_ready()
+        await bot.wait_until_ready()
         
+        # Ensure all guilds are chunked
+        for guild in bot.guilds:
+            if not guild.chunked:
+                logger.info(f"Chunking guild: {guild.name}")
+                await guild.chunk()
+                
         # Load all trackers from database
         trackers = database.get_trackers()
         logger.info(f"Loading {len(trackers)} trackers from database")
@@ -320,6 +325,19 @@ async def on_ready():
                 # Convert database model to TokenTracker object
                 channel_id = int(tracker.channel_id)  # Ensure it's an int
                 key = get_tracker_key(tracker.policy_id, channel_id)
+                
+                # Verify channel exists before creating tracker
+                channel_found = False
+                for guild in bot.guilds:
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        channel_found = True
+                        logger.info(f"Verified channel {channel_id} exists in guild {guild.name}")
+                        break
+                
+                if not channel_found:
+                    logger.warning(f"Channel {channel_id} not found in any guild, skipping tracker")
+                    continue
                 
                 active_trackers[key] = TokenTracker(
                     policy_id=tracker.policy_id,
@@ -344,7 +362,8 @@ async def on_ready():
         # Log guild information
         for guild in bot.guilds:
             logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
-            logger.info(f"Available channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
+            channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
+            logger.info(f"Available text channels: {[f'{c.name} (ID: {c.id})' for c in channels]}")
             
     except Exception as e:
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
@@ -417,6 +436,7 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         # If not in cache, try to fetch it directly
         if not channel:
             try:
+                logger.info(f"Channel {tracker.channel_id} not in cache, trying to fetch directly")
                 channel = await bot.fetch_channel(tracker.channel_id)
                 logger.info(f"Successfully fetched channel {tracker.channel_id} directly")
             except discord.NotFound:
@@ -429,8 +449,13 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                 logger.error(f"Error fetching channel {tracker.channel_id}: {str(e)}")
                 
                 # As a last resort, try searching through guilds
+                logger.info(f"Attempting to find channel {tracker.channel_id} by searching guilds")
                 for guild in bot.guilds:
                     try:
+                        if not guild.chunked:
+                            logger.info(f"Chunking guild {guild.name} before searching")
+                            await guild.chunk()
+                        
                         channel = guild.get_channel(tracker.channel_id)
                         if channel:
                             logger.info(f"Found channel {tracker.channel_id} in guild {guild.name}")
@@ -441,6 +466,12 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                     
         if not channel:
             logger.error(f"Channel {tracker.channel_id} not found in any guild")
+            # Remove the tracker since the channel no longer exists
+            key = get_tracker_key(tracker.policy_id, tracker.channel_id)
+            if key in active_trackers:
+                logger.info(f"Removing tracker for non-existent channel {tracker.channel_id}")
+                del active_trackers[key]
+                database.remove_tracker(tracker.policy_id, tracker.channel_id)
             return
             
         # Create appropriate embed based on transaction type
@@ -468,7 +499,6 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                     logger.error(f"Bot does not have permission to send messages in channel {tracker.channel_id}")
                 except Exception as e:
                     logger.error(f"Error sending transfer notification to channel {tracker.channel_id}: {str(e)}")
-                
     except Exception as e:
         logger.error(f"Error in send_transaction_notification: {str(e)}", exc_info=True)
 
