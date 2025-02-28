@@ -331,8 +331,11 @@ class TokenTracker:
         self.trade_notifications = trade_notifications
         self.transfer_notifications = transfer_notifications
         
-        # Get token info including decimals if not provided
-        self.token_info = token_info or get_token_info(policy_id)
+        # Try to get token info but don't fail if unavailable
+        if token_info is None:
+            token_info = get_token_info(policy_id)
+        self.token_info = token_info or {'decimals': 0}  # Default to 0 decimals if no info available
+        
         if self.token_info:
             logger.info(f"Token {token_name} has {self.token_info.get('decimals', 0)} decimals")
         
@@ -376,10 +379,6 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                     
         if not channel:
             logger.error(f"Channel {tracker.channel_id} not found in any guild")
-            # Remove tracker since channel is not accessible
-            if tracker.policy_id in active_trackers:
-                del active_trackers[tracker.policy_id]
-            database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
             return
             
         # Create appropriate embed based on transaction type
