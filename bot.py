@@ -78,6 +78,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True  # Required to access guild information
 intents.guild_messages = True  # Required to send messages in guilds
+intents.members = True  # Required for member-related operations
 bot = commands.Bot(command_prefix='/', intents=intents)
 
 # Initialize Blockfrost API
@@ -395,9 +396,14 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         
         # If not in cache, try to find it in guilds
         if not channel:
+            # Log all guilds and channels for debugging
+            logger.info(f"Bot is in {len(bot.guilds)} guilds")
             for guild in bot.guilds:
+                logger.info(f"Checking guild: {guild.name} (ID: {guild.id})")
+                logger.info(f"Guild channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
                 channel = guild.get_channel(tracker.channel_id)
                 if channel:
+                    logger.info(f"Found channel {channel.name} in guild {guild.name}")
                     break
                     
         if not channel:
