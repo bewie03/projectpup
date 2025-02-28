@@ -246,7 +246,11 @@ async def transaction_webhook(request: Request):
                     logger.info(f"Analyzing transaction for {tracker.token_name} ({tracker.policy_id})")
                     
                     # Create transaction data structure for analysis
-                    analysis_data = tx
+                    analysis_data = {
+                        'inputs': inputs,
+                        'outputs': outputs,
+                        'tx': tx
+                    }
 
                     # Analyze the transaction
                     tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, tracker.policy_id)
