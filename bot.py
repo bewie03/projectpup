@@ -222,11 +222,15 @@ async def transaction_webhook(request: Request):
                     input_addresses.append(inp.get('address', ''))
                     for amt in inp.get('amount', []):
                         unit = amt.get('unit', '')
+                        # Skip lovelace (ADA)
+                        if unit == 'lovelace':
+                            continue
+                            
                         # Debug log the unit we're checking
-                        logger.debug(f"Checking input unit: {unit}")
+                        logger.info(f"Checking input unit: {unit} against policy: {tracker.policy_id}")
                         
-                        # Only check policy ID in webhook handler
-                        if unit.startswith(tracker.policy_id):
+                        # Check if unit matches our policy ID (policy IDs are 56 chars)
+                        if len(unit) >= 56 and unit[:56].lower() == tracker.policy_id.lower():
                             is_involved = True
                             logger.info(f"Found token {active_tracker.token_name} in transaction inputs")
                             break
@@ -240,11 +244,15 @@ async def transaction_webhook(request: Request):
                         output_addresses.append(out.get('address', ''))
                         for amt in out.get('amount', []):
                             unit = amt.get('unit', '')
+                            # Skip lovelace (ADA)
+                            if unit == 'lovelace':
+                                continue
+                                
                             # Debug log the unit we're checking
-                            logger.debug(f"Checking output unit: {unit}")
+                            logger.info(f"Checking output unit: {unit} against policy: {tracker.policy_id}")
                             
-                            # Only check policy ID in webhook handler
-                            if unit.startswith(tracker.policy_id):
+                            # Check if unit matches our policy ID (policy IDs are 56 chars)
+                            if len(unit) >= 56 and unit[:56].lower() == tracker.policy_id.lower():
                                 is_involved = True
                                 logger.info(f"Found token {active_tracker.token_name} in transaction outputs")
                                 break
