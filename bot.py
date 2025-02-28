@@ -279,8 +279,8 @@ async def process_webhook(request: Request):
         webhook_data = await request.json()
         logger.info("Received webhook request")
         
-        # Extract transactions
-        transactions = webhook_data.get('payload', {}).get('tx', [])
+        # Extract transactions - webhook_data is a list of transactions directly
+        transactions = webhook_data if isinstance(webhook_data, list) else []
         logger.info(f"Webhook contains {len(transactions)} transaction(s)")
         
         # Process each transaction
