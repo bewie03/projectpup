@@ -155,11 +155,13 @@ async def on_ready():
     try:
         # Only initialize in worker dyno
         if not is_worker():
+            logger.info("Not worker dyno, skipping initialization")
             return
             
         # Prevent multiple initializations
         async with initialization_lock:
             if is_ready.is_set():
+                logger.info("Bot already initialized")
                 return
                 
             logger.info(f"Bot {bot.user.name} is starting up...")
@@ -176,9 +178,10 @@ async def on_ready():
                 logger.info("Successfully synced slash commands")
             except Exception as e:
                 logger.error(f"Failed to sync slash commands: {str(e)}")
+                raise  # Re-raise to mark initialization as failed
             
-            # Load trackers in background task
-            bot.loop.create_task(load_trackers())
+            # Load trackers
+            await load_trackers()
             
             # Set ready state in Redis and locally
             set_redis_state(True)
@@ -190,7 +193,7 @@ async def on_ready():
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
         # Store error in Redis and locally
         set_redis_state(False, str(e))
-        is_ready.set()
+        is_ready.clear()  # Don't set ready if initialization failed
 
 @bot.event
 async def on_disconnect():
@@ -1603,6 +1606,61 @@ def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> 
     except Exception as e:
         logger.error(f"Error verifying webhook signature: {str(e)}", exc_info=True)
         return False
+
+# Load trackers from database
+async def load_trackers():
+    """Load trackers from database into memory"""
+    try:
+        logger.info("Loading trackers from database...")
+        trackers = database.get_trackers()
+        loaded_count = 0
+        
+        for db_tracker in trackers:
+            try:
+                # Verify channel exists and is accessible
+                channel_id = int(db_tracker.channel_id)
+                channel = None
+                
+                for guild in bot.guilds:
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        # Verify bot has permission to send messages
+                        permissions = channel.permissions_for(guild.me)
+                        if not permissions.send_messages:
+                            logger.error(f"Bot lacks permission to send messages in channel {channel_id}")
+                            continue
+                        break
+                
+                if not channel:
+                    logger.error(f"Channel {channel_id} not found or inaccessible")
+                    continue
+                    
+                # Create tracker and add to memory
+                key = get_tracker_key(db_tracker.policy_id, channel_id)
+                tracker = TokenTracker(
+                    policy_id=db_tracker.policy_id,
+                    channel_id=channel_id,
+                    token_name=db_tracker.token_name,
+                    image_url=db_tracker.image_url,
+                    threshold=db_tracker.threshold,
+                    track_transfers=db_tracker.track_transfers,
+                    last_block=db_tracker.last_block,
+                    trade_notifications=db_tracker.trade_notifications,
+                    transfer_notifications=db_tracker.transfer_notifications,
+                    token_info=db_tracker.token_info
+                )
+                active_trackers[key] = tracker
+                loaded_count += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to load tracker: {str(e)}")
+                continue
+                
+        logger.info(f"Successfully loaded {loaded_count} trackers")
+        
+    except Exception as e:
+        logger.error(f"Error loading trackers: {str(e)}")
+        raise  # Re-raise to mark initialization as failed
 
 # Run the FastAPI webhook server
 def run_webhook_server():
