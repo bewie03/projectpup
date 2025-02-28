@@ -263,26 +263,39 @@ async def transaction_webhook(request: Request):
             logger.error(f"Invalid webhook data format: {data.get('type', 'unknown type')}")
             return {"status": "ignored"}
             
-        # Get transactions from payload
-        transactions = data.get('payload', [])
-        if not transactions:
-            logger.info("Webhook contains no transactions")
-            return {"status": "no transactions"}
-            
+        # Process webhook data
+        await process_webhook(request)
+        
+        return {"status": "ok"}
+        
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def process_webhook(request: Request):
+    """Process incoming webhook from Blockfrost"""
+    try:
+        # Parse webhook data
+        webhook_data = await request.json()
+        logger.info("Received webhook request")
+        
+        # Extract transactions
+        transactions = webhook_data.get('payload', {}).get('tx', [])
+        logger.info(f"Webhook contains {len(transactions)} transaction(s)")
+        
         # Process each transaction
-        for tx_hash in transactions:
-            logger.info(f"Processing transaction: {tx_hash}")
-            
+        for tx_data in transactions:
             try:
-                # Get transaction details from Blockfrost
-                tx = api.transaction(tx_hash)
-                utxos = api.transaction_utxos(tx_hash)
+                # Extract transaction data from webhook payload
+                tx = tx_data.get('tx', {})
+                inputs = tx_data.get('inputs', [])
+                outputs = tx_data.get('outputs', [])
+                tx_hash = tx.get('hash', 'unknown')
                 
-                # Extract inputs and outputs
-                inputs = utxos.inputs
-                outputs = utxos.outputs
+                logger.info(f"Processing transaction: {tx_hash}")
                 
-                if not inputs or not outputs:
+                # Skip if missing required data
+                if not tx or not inputs or not outputs:
                     logger.warning(f"Skipping transaction {tx_hash} - Missing required data")
                     continue
                 
@@ -351,30 +364,30 @@ async def transaction_webhook(request: Request):
                             # Log token involvement
                             logger.info(f"Analyzing transaction for {tracker.token_name} ({policy_id})")
                             
-                            # Analyze transaction
-                            tx_type, ada_amount, token_amount = analyze_transaction(
-                                tx_hash, 
-                                policy_id,
-                                token_tracker.token_info.get('decimals', 0)
-                            )
+                            # Create transaction data structure for analysis
+                            analysis_data = {
+                                'inputs': inputs,
+                                'outputs': outputs,
+                                'tx': tx
+                            }
                             
-                            if tx_type:
-                                logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
-                                
-                                # Send notification
-                                await send_transaction_notification(
-                                    token_tracker,
-                                    tx_type,
-                                    ada_amount,
-                                    token_amount,
-                                    get_transaction_details(tx_hash)
-                                )
-                                
-                                # Update notification counts in database
-                                if tx_type == 'trade':
-                                    database.increment_trade_notifications(policy_id, channel_id)
-                                elif tx_type == 'wallet_transfer':
-                                    database.increment_transfer_notifications(policy_id, channel_id)
+                            # Analyze the transaction
+                            tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, policy_id)
+                            
+                            # Add transaction hash to details
+                            details['hash'] = tx_hash
+                            
+                            # Log analysis results
+                            logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
+                            
+                            # Send notification
+                            await send_transaction_notification(token_tracker, tx_type, ada_amount, token_amount, details)
+                            
+                            # Update notification counts in database
+                            if tx_type == 'trade':
+                                database.increment_trade_notifications(policy_id, channel_id)
+                            elif tx_type == 'wallet_transfer':
+                                database.increment_transfer_notifications(policy_id, channel_id)
                         else:
                             logger.debug(f"Token {tracker.token_name} not involved in transaction {tx_hash}")
                             
@@ -383,7 +396,7 @@ async def transaction_webhook(request: Request):
                         continue
                         
             except Exception as e:
-                logger.error(f"Error processing transaction {tx_hash}: {str(e)}", exc_info=True)
+                logger.error(f"Error processing transaction {tx_data}: {str(e)}", exc_info=True)
                 continue
         
         return {"status": "ok"}
