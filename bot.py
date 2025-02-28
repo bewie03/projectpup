@@ -80,31 +80,71 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.auto_reconnect = True
 
-# Track bot connection state
+# Track bot connection state and initialization
 is_ready = asyncio.Event()
+initialization_lock = asyncio.Lock()
+initialization_error = None
 
 @bot.event
 async def on_ready():
     """Called when the bot is ready"""
+    global initialization_error
+    
     try:
-        logger.info(f"Bot {bot.user.name} is starting up...")
-        
-        # Wait for guilds to be chunked and ready
-        logger.info("Waiting for guilds to be ready...")
-        await bot.wait_until_ready()
-        
-        # Ensure all guilds are chunked
-        for guild in bot.guilds:
-            if not guild.chunked:
-                logger.info(f"Chunking guild: {guild.name}")
-                await guild.chunk()
+        # Prevent multiple initializations
+        async with initialization_lock:
+            if is_ready.is_set():
+                return
                 
-        # Log guild information
-        for guild in bot.guilds:
-            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
-            channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
-            logger.info(f"Available text channels: {[f'{c.name} (ID: {c.id})' for c in channels]}")
-        
+            logger.info(f"Bot {bot.user.name} is starting up...")
+            
+            # Log guild information first for quick feedback
+            for guild in bot.guilds:
+                logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
+                channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
+                logger.info(f"Available text channels: {[f'{c.name} (ID: {c.id})' for c in channels]}")
+            
+            # Sync slash commands early
+            try:
+                await bot.tree.sync()
+                logger.info("Successfully synced slash commands")
+            except Exception as e:
+                logger.error(f"Failed to sync slash commands: {str(e)}")
+            
+            # Load trackers in background task to avoid blocking
+            bot.loop.create_task(load_trackers())
+            
+            # Set ready state - we can handle requests now
+            is_ready.set()
+            logger.info("Bot is ready and accepting requests")
+            
+    except Exception as e:
+        initialization_error = str(e)
+        logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
+        # Still set ready to prevent hanging
+        is_ready.set()
+
+@bot.event
+async def on_disconnect():
+    """Called when the bot disconnects from Discord"""
+    logger.warning("Bot disconnected from Discord")
+    # Don't clear ready state on disconnect to avoid webhook interruption
+    # is_ready.clear()
+
+@bot.event
+async def on_connect():
+    """Called when the bot connects to Discord"""
+    logger.info("Bot connected to Discord")
+
+@bot.event
+async def on_resumed():
+    """Called when the bot resumes a session"""
+    logger.info("Bot resumed connection to Discord")
+    # Don't set ready state here, it's managed by on_ready
+
+async def load_trackers():
+    """Load trackers in background task"""
+    try:
         # Load all trackers from database
         trackers = database.get_trackers()
         logger.info(f"Loading {len(trackers)} trackers from database")
@@ -112,7 +152,7 @@ async def on_ready():
         for tracker in trackers:
             try:
                 # Convert database model to TokenTracker object
-                channel_id = int(tracker.channel_id)  # Ensure it's an int
+                channel_id = int(tracker.channel_id)
                 key = get_tracker_key(tracker.policy_id, channel_id)
                 
                 # Verify channel exists and is accessible
@@ -150,37 +190,8 @@ async def on_ready():
             except Exception as e:
                 logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
                 
-        # Sync slash commands
-        try:
-            await bot.tree.sync()
-            logger.info("Successfully synced slash commands")
-        except Exception as e:
-            logger.error(f"Failed to sync slash commands: {str(e)}")
-        
-        # Set the ready event to indicate bot is fully initialized
-        is_ready.set()
-        logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
-        
     except Exception as e:
-        logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
-        # Don't set ready event if initialization failed
-
-@bot.event
-async def on_disconnect():
-    """Called when the bot disconnects from Discord"""
-    logger.warning("Bot disconnected from Discord")
-    is_ready.clear()
-
-@bot.event
-async def on_connect():
-    """Called when the bot connects to Discord"""
-    logger.info("Bot connected to Discord")
-
-@bot.event
-async def on_resumed():
-    """Called when the bot resumes a session"""
-    logger.info("Bot resumed connection to Discord")
-    is_ready.set()
+        logger.error(f"Error loading trackers: {str(e)}", exc_info=True)
 
 # Initialize Blockfrost API
 api = BlockFrostApi(
@@ -243,14 +254,16 @@ def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> 
 async def transaction_webhook(request: Request):
     """Handle incoming transaction webhooks from Blockfrost"""
     try:
-        # Check if bot is ready
+        # Quick check if bot is ready
         if not is_ready.is_set():
             logger.warning("Bot is not ready, waiting for connection...")
             try:
-                # Wait up to 30 seconds for bot to be ready
-                await asyncio.wait_for(is_ready.wait(), timeout=30.0)
+                # Reduced timeout to avoid Heroku H12 errors
+                await asyncio.wait_for(is_ready.wait(), timeout=15.0)
             except asyncio.TimeoutError:
                 logger.error("Timeout waiting for bot to be ready")
+                if initialization_error:
+                    raise HTTPException(status_code=503, detail=f"Bot initialization failed: {initialization_error}")
                 raise HTTPException(status_code=503, detail="Bot not ready")
         
         # Log webhook received
@@ -435,6 +448,7 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         if not is_ready.is_set():
             logger.warning("Bot is not ready, waiting for connection...")
             try:
+                # Wait up to 30 seconds for bot to be ready
                 await asyncio.wait_for(is_ready.wait(), timeout=30)
             except asyncio.TimeoutError:
                 logger.error("Timed out waiting for bot to be ready")
