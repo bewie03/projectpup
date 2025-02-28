@@ -273,12 +273,16 @@ async def transaction_webhook(request: Request):
                     
                     # Instead of trying to send notification directly, add to queue
                     notification_data = {
-                        'tx_details': tx_details,
-                        'policy_id': policy_id,
+                        'tx_details': analysis_data,
+                        'policy_id': active_tracker.policy_id,
                         'ada_amount': ada_amount,
                         'token_amount': token_amount,
-                        'analysis_details': analysis_details,
-                        'tracker': tracker
+                        'analysis_details': {
+                            'type': tx_type,
+                            'hash': tx_hash,
+                            **details
+                        },
+                        'tracker': active_tracker
                     }
                     notification_queue.put(notification_data)
                     
@@ -295,21 +299,29 @@ async def process_notification_queue():
         while not notification_queue.empty():
             data = notification_queue.get_nowait()
             
-            # Extract data
-            tx_details = data['tx_details']
-            policy_id = data['policy_id']
-            ada_amount = data['ada_amount']
-            token_amount = data['token_amount']
-            analysis_details = data['analysis_details']
-            tracker = data['tracker']
-            
-            # Send the notification
-            await send_transaction_notification(tracker, analysis_details['type'], 
-                                             ada_amount, token_amount, analysis_details)
-            
-            notification_queue.task_done()
+            try:
+                # Extract data
+                tx_details = data['tx_details']
+                tracker = data['tracker']
+                ada_amount = data['ada_amount']
+                token_amount = data['token_amount']
+                analysis_details = data['analysis_details']
+                
+                # Send the notification
+                await send_transaction_notification(
+                    tracker=tracker,
+                    tx_type=analysis_details['type'],
+                    ada_amount=ada_amount,
+                    token_amount=token_amount,
+                    details=analysis_details
+                )
+                
+                notification_queue.task_done()
+            except Exception as e:
+                logger.error(f"Error processing notification: {str(e)}", exc_info=True)
+                
     except Exception as e:
-        logger.error(f"Error processing notification queue: {str(e)}")
+        logger.error(f"Error in notification queue loop: {str(e)}", exc_info=True)
 
 def run_webhook_server():
     """Run the FastAPI webhook server"""
