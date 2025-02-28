@@ -19,7 +19,8 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         # Get the channel
         channel = bot.get_channel(tracker.channel_id)
         if not channel:
-            logger.error(f"Could not find channel {tracker.channel_id}")
+            logger.error(f"Could not find channel {tracker.channel_id} for token {tracker.token_name}. The bot may have been removed from the server or the channel may have been deleted.")
+            # TODO: Consider removing or marking this tracker as inactive
             return
 
         # Skip if amount is below threshold
