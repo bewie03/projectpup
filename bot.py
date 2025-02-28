@@ -481,23 +481,23 @@ def format_token_amount(amount: int, decimals: int) -> str:
     else:
         return f"{formatted:,.{min(decimals, 6)}f}"
 
-def get_transaction_details(api: BlockFrostApi, tx_hash: str):
+async def get_transaction_details(api: BlockFrostApi, tx_hash: str):
     try:
         logger.info(f"Fetching transaction details for tx_hash: {tx_hash}")
         # Get detailed transaction information
-        tx = api.transaction(tx_hash)
+        tx = await api.transaction(tx_hash)
         if isinstance(tx, Exception):
             raise tx
         logger.debug(f"Transaction details retrieved: {tx_hash}")
         
         # Get transaction UTXOs
-        utxos = api.transaction_utxos(tx_hash)
+        utxos = await api.transaction_utxos(tx_hash)
         if isinstance(utxos, Exception):
             raise utxos
         logger.debug(f"Transaction UTXOs retrieved: {tx_hash}")
         
         # Get transaction metadata if available
-        metadata = api.transaction_metadata(tx_hash)
+        metadata = await api.transaction_metadata(tx_hash)
         if isinstance(metadata, Exception):
             raise metadata
         logger.debug(f"Transaction metadata retrieved: {tx_hash}")
@@ -632,10 +632,6 @@ def analyze_transaction_improved(tx_details, policy_id):
         else:
             return 'unknown', 0, 0, details
 
-    except Exception as e:
-        logger.error(f"Error analyzing transaction: {str(e)}", exc_info=True)
-        return 'unknown', 0, 0, {}
-
 async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tracker, analysis_details):
     """Creates a detailed embed for DEX trades with transaction information"""
     try:
@@ -769,10 +765,6 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
         
         return embed
 
-    except Exception as e:
-        logger.error(f"Error creating trade embed: {str(e)}", exc_info=True)
-        return None
-
 async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
     """Creates an embed for token transfer notifications"""
     try:
@@ -824,10 +816,6 @@ async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
         )
 
         return embed
-
-    except Exception as e:
-        logger.error(f"Error creating transfer embed: {str(e)}", exc_info=True)
-        return None
 
 def shorten_address(address):
     """Shortens a Cardano address for display"""
