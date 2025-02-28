@@ -276,16 +276,30 @@ def run_bot():
 
 def run_webhook_server():
     """Run the FastAPI webhook server"""
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
+    # Use 0.0.0.0 to accept connections from any IP
+    port = int(os.getenv('PORT', 8000))
+    config = uvicorn.Config(
+        app=app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    server.run()
 
 if __name__ == '__main__':
-    # Create and start the webhook server thread
-    webhook_thread = threading.Thread(target=run_webhook_server)
-    webhook_thread.daemon = True  # This ensures the thread will be killed when the main process exits
-    webhook_thread.start()
-    
-    # Run the bot in the main thread
-    run_bot()
+    try:
+        # Create and start the webhook server thread
+        webhook_thread = threading.Thread(target=run_webhook_server)
+        webhook_thread.daemon = True
+        webhook_thread.start()
+        logger.info("Webhook server started in background thread")
+        
+        # Run the bot in the main thread
+        logger.info("Starting Discord bot in main thread")
+        run_bot()
+    except Exception as e:
+        logger.error(f"Error in main: {str(e)}", exc_info=True)
 
 @bot.event
 async def on_ready():
