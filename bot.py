@@ -158,27 +158,32 @@ async def transaction_webhook(request: Request):
         data = await request.json()
         logger.info("Received webhook request")
         
-        if "transactions" not in data:
-            raise HTTPException(status_code=400, detail="No transactions in webhook")
+        # Validate webhook data
+        if not isinstance(data, dict) or 'type' not in data or data['type'] != 'transaction':
+            logger.error(f"Invalid webhook data format: {data}")
+            raise HTTPException(status_code=400, detail="Invalid webhook format")
             
-        transactions = data["transactions"]
+        # Get transactions from payload
+        transactions = data.get('payload', [])
+        if not transactions:
+            logger.warning("No transactions in webhook payload")
+            return {"status": "no_transactions"}
+            
         logger.info(f"Webhook contains {len(transactions)} transaction(s)")
         
-        # Get all trackers from database
-        trackers = database.get_trackers()
-        logger.info(f"Checking {len(trackers)} tracked tokens")
-        
         # Process each transaction
-        for tx in transactions:
-            logger.info(f"Processing transaction: {tx['tx_hash']}")
+        for tx_data in transactions:
+            tx_hash = tx_data.get('tx', {}).get('hash', 'unknown')
+            logger.info(f"Processing transaction: {tx_hash}")
             
             try:
                 # Get transaction details from Blockfrost
-                tx_details = await get_transaction_details(api, tx["tx_hash"])
+                tx_details = await get_transaction_details(api, tx_hash)
                 if not tx_details:
                     continue
                     
                 # Check against all trackers
+                trackers = database.get_trackers()
                 for tracker_data in trackers:
                     policy_id = tracker_data.policy_id
                     channel_id = int(tracker_data.channel_id)
@@ -198,7 +203,7 @@ async def transaction_webhook(request: Request):
                         )
                         
             except Exception as e:
-                logger.error(f"Error processing transaction {tx['tx_hash']}: {str(e)}", exc_info=True)
+                logger.error(f"Error processing transaction {tx_hash}: {str(e)}", exc_info=True)
                 continue
                 
         return {"status": "success"}
