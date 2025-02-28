@@ -20,7 +20,6 @@ import uvicorn
 import threading
 import time
 import redis.asyncio as redis
-import aioredis
 
 # Load environment variables
 load_dotenv()
