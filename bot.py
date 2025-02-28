@@ -65,23 +65,28 @@ logger = setup_logging()
 # Configure Redis connection
 REDIS_URL = os.getenv('REDIS_URL')
 if not REDIS_URL:
-    logger.error("REDIS_URL environment variable not set")
-    REDIS_URL = 'redis://localhost:6379'
+    logger.error("REDIS_URL environment variable not set. Redis functionality will be disabled.")
+    if os.getenv('DYNO'):  # We're on Heroku
+        logger.error("Running on Heroku but REDIS_URL is not set. Please configure Redis Cloud add-on.")
 
 redis_client = None
 redis_ready = asyncio.Event()
 
 async def init_redis():
     global redis_client
+    if not REDIS_URL:
+        logger.error("Cannot initialize Redis: REDIS_URL not set")
+        return False
+        
     retries = 5
     retry_delay = 1  # seconds
     
     for attempt in range(retries):
         try:
             if redis_client:
-                await redis_client.close()
+                await redis_client.aclose()
             
-            logger.info(f"Connecting to Redis at {REDIS_URL} (attempt {attempt + 1}/{retries})")
+            logger.info(f"Connecting to Redis (attempt {attempt + 1}/{retries})")
             redis_client = await redis.from_url(
                 REDIS_URL,
                 encoding="utf-8",
@@ -101,24 +106,6 @@ async def init_redis():
             else:
                 logger.error("Max retries reached, Redis connection failed")
                 return False
-
-# Bot ready state in Redis
-async def set_bot_ready(ready: bool):
-    try:
-        if redis_client and redis_ready.is_set():
-            await redis_client.set("bot_ready", "1" if ready else "0")
-            logger.info(f"Bot ready state set to: {ready}")
-    except Exception as e:
-        logger.error(f"Error setting bot ready state: {e}")
-
-async def is_bot_ready():
-    try:
-        if redis_client and redis_ready.is_set():
-            state = await redis_client.get("bot_ready")
-            return state == "1"
-    except Exception as e:
-        logger.error(f"Error checking bot ready state: {e}")
-    return False
 
 # Initialize FastAPI app
 app = FastAPI()
