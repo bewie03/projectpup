@@ -270,9 +270,22 @@ async def transaction_webhook(request: Request):
         logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+def run_bot():
+    """Run the Discord bot"""
+    bot.run(os.getenv('DISCORD_TOKEN'))
+
 def run_webhook_server():
     """Run the FastAPI webhook server"""
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
+
+if __name__ == '__main__':
+    # Create and start the webhook server thread
+    webhook_thread = threading.Thread(target=run_webhook_server)
+    webhook_thread.daemon = True  # This ensures the thread will be killed when the main process exits
+    webhook_thread.start()
+    
+    # Run the bot in the main thread
+    run_bot()
 
 @bot.event
 async def on_ready():
@@ -1396,7 +1409,3 @@ async def stop(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Error in stop command: {str(e)}", exc_info=True)
         await interaction.response.send_message("Failed to process stop command. Please try again.", ephemeral=True)
-
-# Run the bot
-if __name__ == "__main__":
-    bot.run(os.getenv('DISCORD_TOKEN'))
