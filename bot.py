@@ -76,14 +76,98 @@ app.add_middleware(
 # Initialize Discord bot with necessary intents
 intents = discord.Intents.default()
 intents.message_content = True
-intents.guilds = True  # Required to access guild information
-intents.guild_messages = True  # Required to send messages in guilds
-intents.members = True  # Required to access member information
-intents.message_content = True  # Required to read message content
-bot = commands.Bot(command_prefix='/', intents=intents)
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+bot.auto_reconnect = True
 
-# Enable member caching for all guilds
-bot.chunk_guilds_at_startup = True  # Enable member caching at startup
+# Track bot connection state
+is_ready = asyncio.Event()
+
+@bot.event
+async def on_ready():
+    """Called when the bot is ready"""
+    try:
+        # Set the ready event
+        is_ready.set()
+        
+        # Wait for guilds to be chunked and ready
+        logger.info("Waiting for guilds to be ready...")
+        await bot.wait_until_ready()
+        
+        # Ensure all guilds are chunked
+        for guild in bot.guilds:
+            if not guild.chunked:
+                logger.info(f"Chunking guild: {guild.name}")
+                await guild.chunk()
+                
+        # Load all trackers from database
+        trackers = database.get_trackers()
+        logger.info(f"Loading {len(trackers)} trackers from database")
+        
+        for tracker in trackers:
+            try:
+                # Convert database model to TokenTracker object
+                channel_id = int(tracker.channel_id)  # Ensure it's an int
+                key = get_tracker_key(tracker.policy_id, channel_id)
+                
+                # Verify channel exists before creating tracker
+                channel_found = False
+                for guild in bot.guilds:
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        channel_found = True
+                        logger.info(f"Verified channel {channel_id} exists in guild {guild.name}")
+                        break
+                
+                if not channel_found:
+                    logger.warning(f"Channel {channel_id} not found in any guild, skipping tracker")
+                    continue
+                
+                active_trackers[key] = TokenTracker(
+                    policy_id=tracker.policy_id,
+                    channel_id=channel_id,
+                    token_name=tracker.token_name,
+                    image_url=tracker.image_url,
+                    threshold=tracker.threshold,
+                    track_transfers=tracker.track_transfers,
+                    last_block=tracker.last_block,
+                    trade_notifications=tracker.trade_notifications,
+                    transfer_notifications=tracker.transfer_notifications,
+                    token_info=tracker.token_info
+                )
+                logger.info(f"Loaded tracker for {tracker.token_name} in channel {channel_id}")
+            except Exception as e:
+                logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
+                
+        # Sync slash commands
+        await bot.tree.sync()
+        logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
+        
+        # Log guild information
+        for guild in bot.guilds:
+            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
+            channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
+            logger.info(f"Available text channels: {[f'{c.name} (ID: {c.id})' for c in channels]}")
+            
+    except Exception as e:
+        logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
+
+@bot.event
+async def on_disconnect():
+    """Called when the bot disconnects from Discord"""
+    logger.warning("Bot disconnected from Discord")
+    is_ready.clear()
+
+@bot.event
+async def on_connect():
+    """Called when the bot connects to Discord"""
+    logger.info("Bot connected to Discord")
+
+@bot.event
+async def on_resumed():
+    """Called when the bot resumes a session"""
+    logger.info("Bot resumed connection to Discord")
+    is_ready.set()
 
 # Initialize Blockfrost API
 api = BlockFrostApi(
@@ -298,121 +382,18 @@ async def transaction_webhook(request: Request):
         logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-def run_webhook_server():
-    """Run the FastAPI webhook server"""
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
-
-@bot.event
-async def on_ready():
-    """Called when the bot is ready"""
-    try:
-        # Wait for guilds to be chunked and ready
-        logger.info("Waiting for guilds to be ready...")
-        await bot.wait_until_ready()
-        
-        # Ensure all guilds are chunked
-        for guild in bot.guilds:
-            if not guild.chunked:
-                logger.info(f"Chunking guild: {guild.name}")
-                await guild.chunk()
-                
-        # Load all trackers from database
-        trackers = database.get_trackers()
-        logger.info(f"Loading {len(trackers)} trackers from database")
-        
-        for tracker in trackers:
-            try:
-                # Convert database model to TokenTracker object
-                channel_id = int(tracker.channel_id)  # Ensure it's an int
-                key = get_tracker_key(tracker.policy_id, channel_id)
-                
-                # Verify channel exists before creating tracker
-                channel_found = False
-                for guild in bot.guilds:
-                    channel = guild.get_channel(channel_id)
-                    if channel:
-                        channel_found = True
-                        logger.info(f"Verified channel {channel_id} exists in guild {guild.name}")
-                        break
-                
-                if not channel_found:
-                    logger.warning(f"Channel {channel_id} not found in any guild, skipping tracker")
-                    continue
-                
-                active_trackers[key] = TokenTracker(
-                    policy_id=tracker.policy_id,
-                    channel_id=channel_id,
-                    token_name=tracker.token_name,
-                    image_url=tracker.image_url,
-                    threshold=tracker.threshold,
-                    track_transfers=tracker.track_transfers,
-                    last_block=tracker.last_block,
-                    trade_notifications=tracker.trade_notifications,
-                    transfer_notifications=tracker.transfer_notifications,
-                    token_info=tracker.token_info
-                )
-                logger.info(f"Loaded tracker for {tracker.token_name} in channel {channel_id}")
-            except Exception as e:
-                logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
-                
-        # Sync slash commands
-        await bot.tree.sync()
-        logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
-        
-        # Log guild information
-        for guild in bot.guilds:
-            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
-            channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
-            logger.info(f"Available text channels: {[f'{c.name} (ID: {c.id})' for c in channels]}")
-            
-    except Exception as e:
-        logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
-
-# Store active tracking configurations using composite key
-active_trackers = {}
-
-def get_tracker_key(policy_id: str, channel_id: int) -> str:
-    """Generate a unique key for a tracker"""
-    return f"{policy_id}:{channel_id}"
-
-class TokenTracker:
-    def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
-                 image_url: str = None, threshold: float = 1000.0, 
-                 track_transfers: bool = True, last_block: int = None,
-                 trade_notifications: int = 0, transfer_notifications: int = 0,
-                 token_info: dict = None):
-        self.policy_id = policy_id
-        self.channel_id = channel_id
-        self.token_name = token_name
-        self.image_url = image_url
-        self.threshold = threshold
-        self.track_transfers = track_transfers
-        self.last_block = last_block
-        self.trade_notifications = trade_notifications
-        self.transfer_notifications = transfer_notifications
-        
-        # Try to get token info but don't fail if unavailable
-        if token_info is None:
-            token_info = get_token_info(policy_id)
-        self.token_info = token_info or {'decimals': 0}  # Default to 0 decimals if no info available
-        
-        if self.token_info:
-            logger.info(f"Token {token_name} has {self.token_info.get('decimals', 0)} decimals")
-        
-    def __str__(self):
-        return f"TokenTracker(policy_id={self.policy_id}, token_name={self.token_name}, channel_id={self.channel_id})"
-
-    def increment_trade_notifications(self):
-        """Increment the trade notifications counter"""
-        self.trade_notifications += 1
-
-    def increment_transfer_notifications(self):
-        """Increment the transfer notifications counter"""
-        self.transfer_notifications += 1
-
 async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
     """Send a notification about a transaction to the appropriate Discord channel"""
     try:
+        # Check if bot is ready
+        if not is_ready.is_set():
+            logger.warning("Bot is not ready, waiting for connection...")
+            try:
+                await asyncio.wait_for(is_ready.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.error("Timed out waiting for bot to be ready")
+                return
+        
         # For transfers, check if we should track them
         if tx_type == 'wallet_transfer' and not tracker.track_transfers:
             logger.info("Transfer tracking disabled, skipping notification")
@@ -1470,6 +1451,66 @@ async def stop(interaction: discord.Interaction):
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=error_embed, ephemeral=True)
+
+# Store active tracking configurations using composite key
+active_trackers = {}
+
+def get_tracker_key(policy_id: str, channel_id: int) -> str:
+    """Generate a unique key for a tracker"""
+    return f"{policy_id}:{channel_id}"
+
+class TokenTracker:
+    def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
+                 image_url: str = None, threshold: float = 1000.0, 
+                 track_transfers: bool = True, last_block: int = None,
+                 trade_notifications: int = 0, transfer_notifications: int = 0,
+                 token_info: dict = None):
+        self.policy_id = policy_id
+        self.channel_id = channel_id
+        self.token_name = token_name
+        self.image_url = image_url
+        self.threshold = threshold
+        self.track_transfers = track_transfers
+        self.last_block = last_block
+        self.trade_notifications = trade_notifications
+        self.transfer_notifications = transfer_notifications
+        
+        # Try to get token info but don't fail if unavailable
+        if token_info is None:
+            token_info = get_token_info(policy_id)
+        self.token_info = token_info or {'decimals': 0}  # Default to 0 decimals if no info available
+        
+        if self.token_info:
+            logger.info(f"Token {token_name} has {self.token_info.get('decimals', 0)} decimals")
+        
+    def __str__(self):
+        return f"TokenTracker(policy_id={self.policy_id}, token_name={self.token_name}, channel_id={self.channel_id})"
+
+    def increment_trade_notifications(self):
+        """Increment the trade notifications counter"""
+        self.trade_notifications += 1
+
+    def increment_transfer_notifications(self):
+        """Increment the transfer notifications counter"""
+        self.transfer_notifications += 1
+
+# Run the FastAPI webhook server
+def run_webhook_server():
+    """Run the FastAPI webhook server"""
+    port = int(os.getenv("PORT", 8000))
+    
+    # Configure uvicorn to bind quickly
+    config = uvicorn.Config(
+        app=app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+        timeout_keep_alive=30,
+        limit_concurrency=100,
+        timeout_graceful_shutdown=10
+    )
+    server = uvicorn.Server(config)
+    server.run()
 
 # Run the bot
 if __name__ == "__main__":
