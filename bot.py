@@ -75,19 +75,24 @@ app.add_middleware(
 )
 
 # Initialize Redis for cross-dyno communication
-redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
-try:
-    redis_client = redis.from_url(redis_url, decode_responses=True)
-    # Test connection
-    redis_client.ping()
-    logger.info("Successfully connected to Redis")
-except Exception as e:
-    logger.error(f"Failed to connect to Redis: {str(e)}")
+redis_url = os.getenv('REDIS_URL')
+if not redis_url:
+    logger.error("REDIS_URL not set")
     redis_client = None
+else:
+    try:
+        redis_client = redis.from_url(redis_url, decode_responses=True)
+        # Test connection
+        redis_client.ping()
+        logger.info("Successfully connected to Redis")
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis: {str(e)}")
+        redis_client = None
 
 def set_redis_state(ready: bool, error: str = ''):
     """Set bot state in Redis with retries"""
     if not redis_client:
+        logger.error("Cannot set Redis state: Redis not connected")
         return
         
     retries = 3
@@ -95,6 +100,10 @@ def set_redis_state(ready: bool, error: str = ''):
         try:
             redis_client.set('bot_ready', '1' if ready else '0')
             redis_client.set('bot_error', error)
+            if ready:
+                logger.info("Set bot state to READY in Redis")
+            else:
+                logger.warning(f"Set bot state to NOT READY in Redis: {error}")
             return
         except Exception as e:
             logger.error(f"Failed to set Redis state (retries left: {retries}): {str(e)}")
@@ -104,7 +113,7 @@ def set_redis_state(ready: bool, error: str = ''):
 async def check_bot_ready():
     """Check if bot is ready via Redis"""
     if not redis_client:
-        # Fallback to local state if Redis is unavailable
+        logger.warning("Redis not connected, falling back to local state")
         if not is_ready.is_set():
             if initialization_error:
                 raise HTTPException(status_code=503, detail=f"Bot initialization failed: {initialization_error}")
@@ -117,7 +126,9 @@ async def check_bot_ready():
         
         if not ready or ready != '1':
             if error:
+                logger.error(f"Bot not ready: {error}")
                 raise HTTPException(status_code=503, detail=f"Bot initialization failed: {error}")
+            logger.warning("Bot not ready (no error specified)")
             return False
         return True
     except Exception as e:
@@ -215,32 +226,6 @@ async def on_resumed():
         logger.info("Bot resumed connection to Discord")
         set_redis_state(True)
 
-async def check_bot_ready():
-    """Check if bot is ready via Redis"""
-    if not redis_client:
-        # Fallback to local state if Redis is unavailable
-        if not is_ready.is_set():
-            if initialization_error:
-                raise HTTPException(status_code=503, detail=f"Bot initialization failed: {initialization_error}")
-            raise HTTPException(status_code=503, detail="Bot not ready")
-        return True
-        
-    try:
-        ready = redis_client.get('bot_ready')
-        error = redis_client.get('bot_error')
-        
-        if not ready or ready != '1':
-            if error:
-                raise HTTPException(status_code=503, detail=f"Bot initialization failed: {error}")
-            return False
-        return True
-    except Exception as e:
-        logger.error(f"Failed to check Redis state: {str(e)}")
-        # Fallback to local state
-        if not is_ready.is_set():
-            raise HTTPException(status_code=503, detail="Bot not ready")
-        return True
-
 @app.post("/webhook/transaction")
 async def transaction_webhook(request: Request):
     """Handle incoming transaction webhooks from Blockfrost"""
@@ -251,13 +236,14 @@ async def transaction_webhook(request: Request):
             try:
                 # Poll Redis with timeout
                 start_time = time.time()
-                while time.time() - start_time < 15.0:
+                while time.time() - start_time < 10.0:
                     if await check_bot_ready():
+                        logger.info("Bot is now ready")
                         break
                     await asyncio.sleep(0.1)
                 else:
                     logger.error("Timeout waiting for bot to be ready")
-                    raise HTTPException(status_code=503, detail="Bot not ready")
+                    raise HTTPException(status_code=503, detail="Bot not ready after timeout")
             except Exception as e:
                 logger.error(f"Error checking bot status: {str(e)}")
                 raise HTTPException(status_code=503, detail=str(e))
