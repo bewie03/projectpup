@@ -81,7 +81,18 @@ intents.message_content = True
 intents.guilds = True  # Required to access guild information
 intents.guild_messages = True  # Required to send messages in guilds
 intents.members = True  # Required for member-related operations
-bot = commands.Bot(command_prefix='/', intents=intents)
+
+class PupBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix='/', intents=intents)
+        
+    async def setup_hook(self):
+        """This is called when the bot is done preparing data"""
+        await self.tree.sync()
+        logger.info("Synced command tree with Discord")
+
+# Initialize bot
+bot = PupBot()
 
 # Initialize Blockfrost API
 api = BlockFrostApi(
@@ -354,17 +365,7 @@ async def on_ready():
             except Exception as e:
                 logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
                 
-        # Sync slash commands with all guilds
-        await bot.tree.sync()
-        logger.info(f"Synced slash commands with Discord")
-        
-        # Log bot status
         logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
-        
-        # Log guild information
-        for guild in bot.guilds:
-            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
-            logger.info(f"Available channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
             
     except Exception as e:
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
