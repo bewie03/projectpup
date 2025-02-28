@@ -89,6 +89,7 @@ async def on_ready():
     try:
         # Set the ready event
         is_ready.set()
+        logger.info("Bot is ready and connected!")
         
         # Wait for guilds to be chunked and ready
         logger.info("Waiting for guilds to be ready...")
@@ -156,18 +157,19 @@ async def on_ready():
 async def on_disconnect():
     """Called when the bot disconnects from Discord"""
     logger.warning("Bot disconnected from Discord")
-    is_ready.clear()
+    # Don't clear ready state on disconnect to allow queued messages to process
 
 @bot.event
 async def on_connect():
     """Called when the bot connects to Discord"""
     logger.info("Bot connected to Discord")
+    is_ready.set()  # Set ready state on connect
 
 @bot.event
 async def on_resumed():
     """Called when the bot resumes a session"""
     logger.info("Bot resumed connection to Discord")
-    is_ready.set()
+    is_ready.set()  # Set ready state on resume
 
 # Initialize Blockfrost API
 api = BlockFrostApi(
@@ -389,7 +391,8 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
         if not is_ready.is_set():
             logger.warning("Bot is not ready, waiting for connection...")
             try:
-                await asyncio.wait_for(is_ready.wait(), timeout=30)
+                # Reduced timeout to avoid long waits
+                await asyncio.wait_for(is_ready.wait(), timeout=5)
             except asyncio.TimeoutError:
                 logger.error("Timed out waiting for bot to be ready")
                 return
