@@ -165,8 +165,8 @@ async def transaction_webhook(request: Request):
         logger.info(f"Webhook contains {len(transactions)} transaction(s)")
         
         # Get all trackers from database
-        db = database.Database()
-        all_trackers = db.get_trackers()
+        trackers = database.get_trackers()
+        logger.info(f"Checking {len(trackers)} tracked tokens")
         
         # Process each transaction
         for tx in transactions:
@@ -179,8 +179,7 @@ async def transaction_webhook(request: Request):
                     continue
                     
                 # Check against all trackers
-                logger.info(f"Checking {len(all_trackers)} tracked tokens")
-                for tracker_data in all_trackers:
+                for tracker_data in trackers:
                     policy_id = tracker_data["policy_id"]
                     channel_id = int(tracker_data["channel_id"])
                     
@@ -217,7 +216,7 @@ async def on_ready():
         await bot.wait_until_ready()
         
         # Load trackers from database
-        db = database.Database()
+        db = database.get_instance()
         trackers = db.get_trackers()
         logger.info(f"Loading {len(trackers)} trackers from database")
         
@@ -295,7 +294,7 @@ async def load_tracker(policy_id: str, channel_id: int):
             return active_trackers[key]
 
         # Get tracker from database
-        db = database.Database()
+        db = database.get_instance()
         tracker_data = db.get_tracker(policy_id, channel_id)
         if tracker_data:
             tracker = TokenTracker(
@@ -848,7 +847,7 @@ class TokenControls(discord.ui.View):
             tracker_key = get_tracker_key(self.policy_id, interaction.channel_id)
             if tracker_key in active_trackers:
                 # Remove from database
-                database.delete_token_tracker(self.policy_id, interaction.channel_id)
+                database.get_instance().delete_token_tracker(self.policy_id, interaction.channel_id)
                 
                 # Remove from active trackers using composite key
                 del active_trackers[tracker_key]
@@ -887,7 +886,7 @@ class TokenControls(discord.ui.View):
             tracker.track_transfers = not tracker.track_transfers
             
             # Update in database
-            database.save_token_tracker({
+            database.get_instance().save_token_tracker({
                 'policy_id': self.policy_id,
                 'token_name': tracker.token_name,
                 'image_url': tracker.image_url,
@@ -1030,7 +1029,7 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
             )
             
             # Add to database
-            database.add_tracker(
+            database.get_instance().add_tracker(
                 policy_id=tracker.policy_id,
                 channel_id=tracker.channel_id,
                 token_name=tracker.token_name,
@@ -1324,7 +1323,7 @@ async def stop(interaction: discord.Interaction):
                 """Stop tracking the token"""
                 try:
                     # Remove from database
-                    database.remove_all_trackers_for_channel(interaction.channel_id)
+                    database.get_instance().remove_all_trackers_for_channel(interaction.channel_id)
         
                     # Remove from active trackers using composite keys
                     keys_to_remove = []
