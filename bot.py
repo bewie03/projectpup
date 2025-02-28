@@ -76,7 +76,56 @@ app.add_middleware(
 
 # Initialize Redis for cross-dyno communication
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
-redis = redis.from_url(redis_url)
+try:
+    redis_client = redis.from_url(redis_url, decode_responses=True)
+    # Test connection
+    redis_client.ping()
+    logger.info("Successfully connected to Redis")
+except Exception as e:
+    logger.error(f"Failed to connect to Redis: {str(e)}")
+    redis_client = None
+
+def set_redis_state(ready: bool, error: str = ''):
+    """Set bot state in Redis with retries"""
+    if not redis_client:
+        return
+        
+    retries = 3
+    while retries > 0:
+        try:
+            redis_client.set('bot_ready', '1' if ready else '0')
+            redis_client.set('bot_error', error)
+            return
+        except Exception as e:
+            logger.error(f"Failed to set Redis state (retries left: {retries}): {str(e)}")
+            retries -= 1
+            time.sleep(0.1)
+
+async def check_bot_ready():
+    """Check if bot is ready via Redis"""
+    if not redis_client:
+        # Fallback to local state if Redis is unavailable
+        if not is_ready.is_set():
+            if initialization_error:
+                raise HTTPException(status_code=503, detail=f"Bot initialization failed: {initialization_error}")
+            raise HTTPException(status_code=503, detail="Bot not ready")
+        return True
+        
+    try:
+        ready = redis_client.get('bot_ready')
+        error = redis_client.get('bot_error')
+        
+        if not ready or ready != '1':
+            if error:
+                raise HTTPException(status_code=503, detail=f"Bot initialization failed: {error}")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"Failed to check Redis state: {str(e)}")
+        # Fallback to local state
+        if not is_ready.is_set():
+            raise HTTPException(status_code=503, detail="Bot not ready")
+        return True
 
 # Initialize Discord bot with necessary intents
 intents = discord.Intents.default()
@@ -131,21 +180,16 @@ async def on_ready():
             # Load trackers in background task
             bot.loop.create_task(load_trackers())
             
-            # Set ready state in Redis for web dyno
-            redis.set('bot_ready', '1')
-            redis.set('bot_error', '')
-            
-            # Set ready state locally
+            # Set ready state in Redis and locally
+            set_redis_state(True)
             is_ready.set()
             logger.info("Bot is ready and accepting requests")
             
     except Exception as e:
         initialization_error = str(e)
         logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
-        # Store error in Redis
-        redis.set('bot_error', str(e))
-        redis.set('bot_ready', '0')
-        # Still set ready to prevent hanging
+        # Store error in Redis and locally
+        set_redis_state(False, str(e))
         is_ready.set()
 
 @bot.event
@@ -153,7 +197,7 @@ async def on_disconnect():
     """Called when the bot disconnects from Discord"""
     if is_worker():
         logger.warning("Bot disconnected from Discord")
-        redis.set('bot_ready', '0')
+        set_redis_state(False)
 
 @bot.event
 async def on_connect():
@@ -166,20 +210,33 @@ async def on_resumed():
     """Called when the bot resumes a session"""
     if is_worker():
         logger.info("Bot resumed connection to Discord")
-        redis.set('bot_ready', '1')
+        set_redis_state(True)
 
 async def check_bot_ready():
     """Check if bot is ready via Redis"""
-    ready = redis.get('bot_ready')
-    error = redis.get('bot_error')
-    
-    if not ready or ready.decode() != '1':
-        if error:
-            error_msg = error.decode()
-            if error_msg:
-                raise HTTPException(status_code=503, detail=f"Bot initialization failed: {error_msg}")
-        return False
-    return True
+    if not redis_client:
+        # Fallback to local state if Redis is unavailable
+        if not is_ready.is_set():
+            if initialization_error:
+                raise HTTPException(status_code=503, detail=f"Bot initialization failed: {initialization_error}")
+            raise HTTPException(status_code=503, detail="Bot not ready")
+        return True
+        
+    try:
+        ready = redis_client.get('bot_ready')
+        error = redis_client.get('bot_error')
+        
+        if not ready or ready != '1':
+            if error:
+                raise HTTPException(status_code=503, detail=f"Bot initialization failed: {error}")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"Failed to check Redis state: {str(e)}")
+        # Fallback to local state
+        if not is_ready.is_set():
+            raise HTTPException(status_code=503, detail="Bot not ready")
+        return True
 
 @app.post("/webhook/transaction")
 async def transaction_webhook(request: Request):
