@@ -63,29 +63,61 @@ def setup_logging():
 logger = setup_logging()
 
 # Configure Redis connection
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
+REDIS_URL = os.getenv('REDIS_URL')
+if not REDIS_URL:
+    logger.error("REDIS_URL environment variable not set")
+    REDIS_URL = 'redis://localhost:6379'
+
 redis_client = None
+redis_ready = asyncio.Event()
 
 async def init_redis():
     global redis_client
-    try:
-        redis_client = await redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
-        await redis_client.ping()
-        logger.info("Successfully connected to Redis")
-    except Exception as e:
-        logger.error(f"Failed to connect to Redis: {e}")
-        raise
+    retries = 5
+    retry_delay = 1  # seconds
+    
+    for attempt in range(retries):
+        try:
+            if redis_client:
+                await redis_client.close()
+            
+            logger.info(f"Connecting to Redis at {REDIS_URL} (attempt {attempt + 1}/{retries})")
+            redis_client = await redis.from_url(
+                REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_timeout=5,
+                socket_connect_timeout=5
+            )
+            await redis_client.ping()
+            logger.info("Successfully connected to Redis")
+            redis_ready.set()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis (attempt {attempt + 1}/{retries}): {e}")
+            if attempt < retries - 1:
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                logger.error("Max retries reached, Redis connection failed")
+                return False
 
 # Bot ready state in Redis
 async def set_bot_ready(ready: bool):
-    if redis_client:
-        await redis_client.set("bot_ready", "1" if ready else "0")
-        logger.info(f"Bot ready state set to: {ready}")
+    try:
+        if redis_client and redis_ready.is_set():
+            await redis_client.set("bot_ready", "1" if ready else "0")
+            logger.info(f"Bot ready state set to: {ready}")
+    except Exception as e:
+        logger.error(f"Error setting bot ready state: {e}")
 
 async def is_bot_ready():
-    if redis_client:
-        state = await redis_client.get("bot_ready")
-        return state == "1"
+    try:
+        if redis_client and redis_ready.is_set():
+            state = await redis_client.get("bot_ready")
+            return state == "1"
+    except Exception as e:
+        logger.error(f"Error checking bot ready state: {e}")
     return False
 
 # Initialize FastAPI app
@@ -114,9 +146,15 @@ is_ready = asyncio.Event()
 async def on_ready():
     """Called when the bot is ready"""
     try:
-        await init_redis()
-        await set_bot_ready(True)
         logger.info(f'{bot.user} has connected to Discord!')
+        
+        # Initialize Redis with retries
+        redis_success = await init_redis()
+        if not redis_success:
+            logger.error("Could not initialize Redis, bot may not handle webhooks properly")
+            return
+            
+        await set_bot_ready(True)
         
         # Load existing trackers from database
         trackers = database.load_trackers()
