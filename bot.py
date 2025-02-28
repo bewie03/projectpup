@@ -83,10 +83,6 @@ intents.guild_messages = True  # Required to send messages in guilds
 intents.members = True  # Required for member-related operations
 bot = commands.Bot(command_prefix='/', intents=intents)
 
-# Setup command tree
-tree = app_commands.CommandTree(bot)
-bot.tree = tree
-
 # Initialize Blockfrost API
 api = BlockFrostApi(
     project_id=os.getenv('BLOCKFROST_API_KEY'),
@@ -813,7 +809,7 @@ class TokenControls(discord.ui.View):
 
             # Statistics
             stats_text = (
-                f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
+                f"**Sale Notifications:** ```{tracker.trade_notifications}```\n"
                 f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
             )
             embed.add_field(
