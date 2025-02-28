@@ -19,7 +19,6 @@ import hashlib
 import uvicorn
 import threading
 import time
-import redis.asyncio as redis
 
 # Load environment variables
 load_dotenv()
@@ -62,69 +61,6 @@ def setup_logging():
 # Initialize logging
 logger = setup_logging()
 
-# Configure Redis connection
-REDIS_URL = os.getenv('REDIS_URL')
-if not REDIS_URL:
-    logger.error("REDIS_URL environment variable not set. Redis functionality will be disabled.")
-    if os.getenv('DYNO'):  # We're on Heroku
-        logger.error("Running on Heroku but REDIS_URL is not set. Please configure Redis Cloud add-on.")
-
-redis_client = None
-redis_ready = asyncio.Event()
-
-async def init_redis():
-    global redis_client
-    if not REDIS_URL:
-        logger.error("Cannot initialize Redis: REDIS_URL not set")
-        return False
-        
-    retries = 5
-    retry_delay = 1  # seconds
-    
-    for attempt in range(retries):
-        try:
-            if redis_client:
-                await redis_client.aclose()
-            
-            logger.info(f"Connecting to Redis (attempt {attempt + 1}/{retries})")
-            redis_client = await redis.from_url(
-                REDIS_URL,
-                encoding="utf-8",
-                decode_responses=True,
-                socket_timeout=5,
-                socket_connect_timeout=5
-            )
-            await redis_client.ping()
-            logger.info("Successfully connected to Redis")
-            redis_ready.set()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to Redis (attempt {attempt + 1}/{retries}): {e}")
-            if attempt < retries - 1:
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                logger.error("Max retries reached, Redis connection failed")
-                return False
-
-# Bot ready state in Redis
-async def set_bot_ready(ready: bool):
-    try:
-        if redis_client and redis_ready.is_set():
-            await redis_client.set("bot_ready", "1" if ready else "0")
-            logger.info(f"Bot ready state set to: {ready}")
-    except Exception as e:
-        logger.error(f"Error setting bot ready state: {e}")
-
-async def is_bot_ready():
-    try:
-        if redis_client and redis_ready.is_set():
-            state = await redis_client.get("bot_ready")
-            return state == "1"
-    except Exception as e:
-        logger.error(f"Error checking bot ready state: {e}")
-    return False
-
 # Initialize FastAPI app
 app = FastAPI()
 
@@ -151,27 +87,58 @@ is_ready = asyncio.Event()
 async def on_ready():
     """Called when the bot is ready"""
     try:
-        logger.info(f'{bot.user} has connected to Discord!')
+        # Set the ready event
+        is_ready.set()
         
-        # Initialize Redis with retries
-        redis_success = await init_redis()
-        if not redis_success:
-            logger.error("Could not initialize Redis, bot may not handle webhooks properly")
-            return
-            
-        await set_bot_ready(True)
+        # Wait for guilds to be chunked and ready
+        logger.info("Waiting for guilds to be ready...")
+        await bot.wait_until_ready()
         
-        # Load existing trackers from database
-        trackers = database.load_trackers()
+        # Ensure all guilds are chunked
+        for guild in bot.guilds:
+            if not guild.chunked:
+                logger.info(f"Chunking guild: {guild.name}")
+                await guild.chunk()
+                
+        # Load all trackers from database
+        trackers = database.get_trackers()
+        logger.info(f"Loading {len(trackers)} trackers from database")
+        
         for tracker in trackers:
-            key = get_tracker_key(tracker.policy_id, tracker.channel_id)
-            active_trackers[key] = tracker
-            channel = bot.get_channel(tracker.channel_id)
-            if not channel:
-                logger.warning(f"Could not find channel {tracker.channel_id} for tracker {tracker.policy_id}")
-                continue
-            logger.info(f"Loaded tracker for {tracker.token_name} in channel {channel.name}")
-        
+            try:
+                # Convert database model to TokenTracker object
+                channel_id = int(tracker.channel_id)  # Ensure it's an int
+                key = get_tracker_key(tracker.policy_id, channel_id)
+                
+                # Verify channel exists before creating tracker
+                channel_found = False
+                for guild in bot.guilds:
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        channel_found = True
+                        logger.info(f"Verified channel {channel_id} exists in guild {guild.name}")
+                        break
+                
+                if not channel_found:
+                    logger.warning(f"Channel {channel_id} not found in any guild, skipping tracker")
+                    continue
+                
+                active_trackers[key] = TokenTracker(
+                    policy_id=tracker.policy_id,
+                    channel_id=channel_id,
+                    token_name=tracker.token_name,
+                    image_url=tracker.image_url,
+                    threshold=tracker.threshold,
+                    track_transfers=tracker.track_transfers,
+                    last_block=tracker.last_block,
+                    trade_notifications=tracker.trade_notifications,
+                    transfer_notifications=tracker.transfer_notifications,
+                    token_info=tracker.token_info
+                )
+                logger.info(f"Loaded tracker for {tracker.token_name} in channel {channel_id}")
+            except Exception as e:
+                logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
+                
         # Sync slash commands
         await bot.tree.sync()
         logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
@@ -183,18 +150,24 @@ async def on_ready():
             logger.info(f"Available text channels: {[f'{c.name} (ID: {c.id})' for c in channels]}")
             
     except Exception as e:
-        logger.error(f"Error in on_ready: {e}")
-        await set_bot_ready(False)
+        logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
 
 @bot.event
 async def on_disconnect():
+    """Called when the bot disconnects from Discord"""
     logger.warning("Bot disconnected from Discord")
-    await set_bot_ready(False)
+    is_ready.clear()
+
+@bot.event
+async def on_connect():
+    """Called when the bot connects to Discord"""
+    logger.info("Bot connected to Discord")
 
 @bot.event
 async def on_resumed():
+    """Called when the bot resumes a session"""
     logger.info("Bot resumed connection to Discord")
-    await set_bot_ready(True)
+    is_ready.set()
 
 # Initialize Blockfrost API
 api = BlockFrostApi(
@@ -257,11 +230,6 @@ def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> 
 async def transaction_webhook(request: Request):
     """Handle incoming transaction webhooks from Blockfrost"""
     try:
-        # Check if bot is ready
-        if not await is_bot_ready():
-            logger.warning("Bot is not ready, webhook request rejected")
-            raise HTTPException(status_code=503, detail="Bot is not ready")
-        
         # Log webhook received
         logger.info("Received webhook request")
         
