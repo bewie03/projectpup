@@ -230,41 +230,19 @@ def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> 
 
 @app.post("/webhook/transaction")
 async def transaction_webhook(request: Request):
-    """Handle incoming transaction webhooks from Blockfrost"""
+    """Handle incoming webhook from Blockfrost"""
     try:
-        # Log webhook received
-        logger.info("Received webhook request")
-        
-        # Get the signature
-        signature = request.headers.get('Blockfrost-Signature')
-        if not signature:
-            logger.error("Missing Blockfrost-Signature header")
-            raise HTTPException(status_code=400, detail="Missing signature header")
-        
-        # Get the raw payload
-        payload = await request.body()
-        logger.debug(f"Raw payload size: {len(payload)} bytes")
-        
-        # Verify signature
-        current_time = int(time.time())
-        if not verify_webhook_signature(payload, signature, current_time):
-            logger.error("Invalid webhook signature")
-            raise HTTPException(status_code=401, detail="Invalid signature")
-        
-        # Parse the payload
+        # Parse webhook data
         data = await request.json()
         
-        # Log webhook info
-        tx_count = len(data.get('payload', []))
-        logger.info(f"Webhook contains {tx_count} transaction(s)")
-        
-        # Validate webhook data
-        if not isinstance(data, dict) or 'type' not in data or data['type'] != 'transaction':
-            logger.error(f"Invalid webhook data format: {data.get('type', 'unknown type')}")
+        # Verify webhook type
+        webhook_type = data.get('type', '')
+        if webhook_type != 'transaction':
+            logger.error(f"Invalid webhook data format: {webhook_type}")
             return {"status": "ignored"}
             
         # Process webhook data
-        await process_webhook(request)
+        await process_webhook(data)
         
         return {"status": "ok"}
         
@@ -272,15 +250,11 @@ async def transaction_webhook(request: Request):
         logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-async def process_webhook(request: Request):
+async def process_webhook(data):
     """Process incoming webhook from Blockfrost"""
     try:
-        # Parse webhook data
-        webhook_data = await request.json()
-        logger.info("Received webhook request")
-        
         # Extract transactions - webhook_data is a list of transactions directly
-        transactions = webhook_data if isinstance(webhook_data, list) else []
+        transactions = data if isinstance(data, list) else []
         logger.info(f"Webhook contains {len(transactions)} transaction(s)")
         
         # Process each transaction
