@@ -270,113 +270,121 @@ async def transaction_webhook(request: Request):
             return {"status": "no transactions"}
             
         # Process each transaction
-        for tx_data in transactions:
-            # Get transaction details
-            tx = tx_data.get('tx', {})
-            tx_hash = tx.get('hash', 'unknown')
-            
-            # Log transaction processing
+        for tx_hash in transactions:
             logger.info(f"Processing transaction: {tx_hash}")
             
-            inputs = tx_data.get('inputs', [])
-            outputs = tx_data.get('outputs', [])
-            
-            # Skip if missing required data
-            if not tx or not inputs or not outputs:
-                logger.warning(f"Skipping transaction {tx_hash} - Missing required data")
-                continue
+            try:
+                # Get transaction details from Blockfrost
+                tx = api.transaction(tx_hash)
+                utxos = api.transaction_utxos(tx_hash)
                 
-            # Check if any of our tracked tokens are involved
-            trackers = database.get_trackers()
-            logger.info(f"Checking {len(trackers)} tracked tokens")
-            
-            for db_tracker in trackers:
-                # Check inputs and outputs for our policy ID
-                is_involved = False
+                # Extract inputs and outputs
+                inputs = utxos.inputs
+                outputs = utxos.outputs
                 
-                # Get the active tracker from memory
-                key = get_tracker_key(db_tracker.policy_id, int(db_tracker.channel_id))
-                tracker = active_trackers.get(key)
+                if not inputs or not outputs:
+                    logger.warning(f"Skipping transaction {tx_hash} - Missing required data")
+                    continue
                 
-                if not tracker:
-                    logger.warning(f"Tracker {key} found in database but not in memory, reloading...")
+                # Get trackers directly from database each time
+                trackers = database.get_trackers()
+                logger.info(f"Checking {len(trackers)} tracked tokens")
+                
+                for tracker in trackers:
                     try:
-                        tracker = TokenTracker(
-                            policy_id=db_tracker.policy_id,
-                            channel_id=int(db_tracker.channel_id),
-                            token_name=db_tracker.token_name,
-                            image_url=db_tracker.image_url,
-                            threshold=db_tracker.threshold,
-                            track_transfers=db_tracker.track_transfers,
-                            last_block=db_tracker.last_block,
-                            trade_notifications=db_tracker.trade_notifications,
-                            transfer_notifications=db_tracker.transfer_notifications,
-                            token_info=db_tracker.token_info
+                        channel_id = int(tracker.channel_id)
+                        policy_id = tracker.policy_id
+                        
+                        # Create TokenTracker instance for analysis
+                        token_tracker = TokenTracker(
+                            policy_id=policy_id,
+                            channel_id=channel_id,
+                            token_name=tracker.token_name,
+                            image_url=tracker.image_url,
+                            threshold=tracker.threshold,
+                            track_transfers=tracker.track_transfers,
+                            last_block=tracker.last_block,
+                            trade_notifications=tracker.trade_notifications,
+                            transfer_notifications=tracker.transfer_notifications,
+                            token_info=tracker.token_info
                         )
-                        active_trackers[key] = tracker
-                    except Exception as e:
-                        logger.error(f"Failed to reload tracker {key}: {str(e)}")
-                        continue
-                
-                # Check inputs
-                input_addresses = []
-                for inp in inputs:
-                    input_addresses.append(inp.get('address', ''))
-                    for amt in inp.get('amount', []):
-                        unit = amt.get('unit', '')
-                        # Debug log the unit we're checking
-                        logger.debug(f"Checking input unit: {unit}")
                         
-                        # Only check policy ID in webhook handler
-                        if unit.startswith(tracker.policy_id):
-                            is_involved = True
-                            logger.info(f"Found token {tracker.token_name} in transaction inputs")
-                            break
-                    if is_involved:
-                        break
+                        # Check if token is in transaction
+                        is_involved = False
                         
-                # Check outputs if not found in inputs
-                if not is_involved:
-                    output_addresses = []
-                    for out in outputs:
-                        output_addresses.append(out.get('address', ''))
-                        for amt in out.get('amount', []):
-                            unit = amt.get('unit', '')
-                            # Debug log the unit we're checking
-                            logger.debug(f"Checking output unit: {unit}")
-                            
-                            # Only check policy ID in webhook handler
-                            if unit.startswith(tracker.policy_id):
-                                is_involved = True
-                                logger.info(f"Found token {tracker.token_name} in transaction outputs")
+                        # Check inputs
+                        input_addresses = []
+                        for inp in inputs:
+                            input_addresses.append(inp.get('address', ''))
+                            for amt in inp.get('amount', []):
+                                unit = amt.get('unit', '')
+                                # Debug log the unit we're checking
+                                logger.debug(f"Checking input unit: {unit}")
+                                
+                                # Only check policy ID in webhook handler
+                                if unit.startswith(policy_id):
+                                    is_involved = True
+                                    logger.info(f"Found token {tracker.token_name} in transaction inputs")
+                                    break
+                            if is_involved:
                                 break
+                        
+                        # Check outputs if not found in inputs
+                        if not is_involved:
+                            output_addresses = []
+                            for out in outputs:
+                                output_addresses.append(out.get('address', ''))
+                                for amt in out.get('amount', []):
+                                    unit = amt.get('unit', '')
+                                    # Debug log the unit we're checking
+                                    logger.debug(f"Checking output unit: {unit}")
+                                    
+                                    # Only check policy ID in webhook handler
+                                    if unit.startswith(policy_id):
+                                        is_involved = True
+                                        logger.info(f"Found token {tracker.token_name} in transaction outputs")
+                                        break
+                                if is_involved:
+                                    break
+                        
                         if is_involved:
-                            break
-                
-                if is_involved:
-                    # Log token involvement
-                    logger.info(f"Analyzing transaction for {tracker.token_name} ({tracker.policy_id})")
-                    
-                    # Create transaction data structure for analysis
-                    analysis_data = {
-                        'inputs': inputs,
-                        'outputs': outputs,
-                        'tx': tx
-                    }
-                    
-                    # Analyze the transaction
-                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, tracker.policy_id)
-                    
-                    # Add transaction hash to details
-                    details['hash'] = tx_hash
-                    
-                    # Log analysis results
-                    logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
-                    
-                    # Send notification
-                    await send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details)
-                else:
-                    logger.debug(f"Token {tracker.token_name} not involved in transaction {tx_hash}")
+                            # Log token involvement
+                            logger.info(f"Analyzing transaction for {tracker.token_name} ({policy_id})")
+                            
+                            # Analyze transaction
+                            tx_type, ada_amount, token_amount = analyze_transaction(
+                                tx_hash, 
+                                policy_id,
+                                token_tracker.token_info.get('decimals', 0)
+                            )
+                            
+                            if tx_type:
+                                logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
+                                
+                                # Send notification
+                                await send_transaction_notification(
+                                    token_tracker,
+                                    tx_type,
+                                    ada_amount,
+                                    token_amount,
+                                    get_transaction_details(tx_hash)
+                                )
+                                
+                                # Update notification counts in database
+                                if tx_type == 'trade':
+                                    database.increment_trade_notifications(policy_id, channel_id)
+                                elif tx_type == 'wallet_transfer':
+                                    database.increment_transfer_notifications(policy_id, channel_id)
+                        else:
+                            logger.debug(f"Token {tracker.token_name} not involved in transaction {tx_hash}")
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing tracker {tracker.policy_id}: {str(e)}", exc_info=True)
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"Error processing transaction {tx_hash}: {str(e)}", exc_info=True)
+                continue
         
         return {"status": "ok"}
         
