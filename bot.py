@@ -180,8 +180,8 @@ async def transaction_webhook(request: Request):
                     
                 # Check against all trackers
                 for tracker_data in trackers:
-                    policy_id = tracker_data["policy_id"]
-                    channel_id = int(tracker_data["channel_id"])
+                    policy_id = tracker_data.policy_id
+                    channel_id = int(tracker_data.channel_id)
                     
                     # Load tracker into memory if needed
                     tracker = await load_tracker(policy_id, channel_id)
@@ -222,29 +222,26 @@ async def on_ready():
         # Initialize trackers and verify channels
         with cache_lock:
             for tracker_data in trackers:
-                policy_id = tracker_data["policy_id"]
-                channel_id = int(tracker_data["channel_id"])
-                
                 # Create and cache the tracker
                 tracker = TokenTracker(
-                    policy_id=policy_id,
-                    channel_id=channel_id,
-                    token_name=tracker_data["token_name"],
-                    image_url=tracker_data["image_url"],
-                    threshold=float(tracker_data["threshold"]),
-                    track_transfers=tracker_data["track_transfers"]
+                    policy_id=tracker_data.policy_id,
+                    channel_id=int(tracker_data.channel_id),
+                    token_name=tracker_data.token_name,
+                    image_url=tracker_data.image_url,
+                    threshold=float(tracker_data.threshold),
+                    track_transfers=tracker_data.track_transfers
                 )
                 
-                key = get_tracker_key(policy_id, channel_id)
+                key = get_tracker_key(tracker.policy_id, tracker.channel_id)
                 active_trackers[key] = tracker
                 
                 # Verify and cache the channel
-                channel = bot.get_channel(channel_id)
+                channel = bot.get_channel(tracker.channel_id)
                 if channel:
-                    channel_cache[channel_id] = channel
-                    logger.info(f"Verified and cached channel {channel_id} in guild {channel.guild.name}")
+                    channel_cache[tracker.channel_id] = channel
+                    logger.info(f"Verified and cached channel {tracker.channel_id} in guild {channel.guild.name}")
                 else:
-                    logger.warning(f"Could not find channel {channel_id} during startup")
+                    logger.warning(f"Could not find channel {tracker.channel_id} during startup")
         
         logger.info(f"Bot is ready! Loaded {len(trackers)} trackers")
         
@@ -296,12 +293,12 @@ async def load_tracker(policy_id: str, channel_id: int):
         tracker_data = database.get_tracker(policy_id, channel_id)
         if tracker_data:
             tracker = TokenTracker(
-                policy_id=tracker_data['policy_id'],
-                channel_id=int(tracker_data['channel_id']),
-                token_name=tracker_data['token_name'],
-                image_url=tracker_data['image_url'],
-                threshold=float(tracker_data['threshold']),
-                track_transfers=tracker_data['track_transfers']
+                policy_id=tracker_data.policy_id,
+                channel_id=int(tracker_data.channel_id),
+                token_name=tracker_data.token_name,
+                image_url=tracker_data.image_url,
+                threshold=float(tracker_data.threshold),
+                track_transfers=tracker_data.track_transfers
             )
             active_trackers[key] = tracker
             logger.info(f"Loaded tracker {key} from database")
