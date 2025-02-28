@@ -21,6 +21,7 @@ import threading
 import time
 from transaction_analysis import analyze_transaction_improved
 from notifications import send_transaction_notification
+import re
 
 # Load environment variables
 load_dotenv()
@@ -88,8 +89,30 @@ class PupBot(commands.Bot):
         
     async def setup_hook(self):
         """This is called when the bot is done preparing data"""
+        # Add all commands
+        self.tree.add_command(TokenControls())
+        self.tree.add_command(TrackingControls())
+        self.tree.add_command(StatusCommands())
+        
+        # Sync with Discord
         await self.tree.sync()
-        logger.info("Synced command tree with Discord")
+        logger.info("Added and synced command tree with Discord")
+
+# Command Groups
+class TokenControls(app_commands.Group):
+    """Token tracking controls"""
+    def __init__(self):
+        super().__init__(name="token", description="Token tracking controls")
+
+class TrackingControls(app_commands.Group):
+    """Tracking threshold controls"""
+    def __init__(self):
+        super().__init__(name="tracking", description="Tracking threshold controls")
+
+class StatusCommands(app_commands.Group):
+    """Status commands"""
+    def __init__(self):
+        super().__init__(name="status", description="Status commands")
 
 # Initialize bot
 bot = PupBot()
@@ -328,30 +351,48 @@ async def on_ready():
             logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
             logger.info("Channels in this guild:")
             for channel in guild.channels:
-                perms = channel.permissions_for(guild.me)
-                can_send = perms.send_messages
-                can_embed = perms.embed_links
-                logger.info(f"- {channel.name} (ID: {channel.id})")
-                logger.info(f"  Permissions: send_messages={can_send}, embed_links={can_embed}")
+                if isinstance(channel, discord.TextChannel):  # Only look at text channels
+                    perms = channel.permissions_for(guild.me)
+                    can_send = perms.send_messages
+                    can_embed = perms.embed_links
+                    logger.info(f"- {channel.name} (ID: {channel.id})")
+                    logger.info(f"  Permissions: send_messages={can_send}, embed_links={can_embed}")
         
         # Now load trackers and verify channel access
         for tracker in trackers:
             try:
                 # Test channel access
-                channel = bot.get_channel(int(tracker.channel_id))
-                if channel:
+                channel_id = int(tracker.channel_id)
+                channel = None
+                
+                # First try getting channel directly
+                channel = bot.get_channel(channel_id)
+                
+                # If that fails, try looking through all guilds
+                if not channel:
+                    for guild in bot.guilds:
+                        channel = guild.get_channel(channel_id)
+                        if channel:
+                            break
+                
+                if channel and isinstance(channel, discord.TextChannel):
                     logger.info(f"✅ Found channel for {tracker.token_name}: {channel.name} (ID: {channel.id})")
                     # Check permissions
                     perms = channel.permissions_for(channel.guild.me)
                     if not perms.send_messages or not perms.embed_links:
                         logger.error(f"❌ Missing permissions in channel {channel.name}: send_messages={perms.send_messages}, embed_links={perms.embed_links}")
                 else:
-                    logger.error(f"❌ Could not find channel {tracker.channel_id} for {tracker.token_name}")
+                    logger.error(f"❌ Could not find channel {channel_id} for {tracker.token_name}")
+                    logger.error("Available channels:")
+                    for guild in bot.guilds:
+                        for ch in guild.channels:
+                            if isinstance(ch, discord.TextChannel):
+                                logger.error(f"  - {ch.name} (ID: {ch.id})")
                 
                 # Convert database model to TokenTracker object
                 active_trackers[tracker.policy_id] = TokenTracker(
                     policy_id=tracker.policy_id,
-                    channel_id=int(tracker.channel_id),  # Ensure it's an int
+                    channel_id=channel_id,
                     token_name=tracker.token_name,
                     image_url=tracker.image_url,
                     threshold=tracker.threshold,
@@ -361,7 +402,7 @@ async def on_ready():
                     transfer_notifications=tracker.transfer_notifications,
                     token_info=tracker.token_info
                 )
-                logger.info(f"Loaded tracker for {tracker.token_name} in channel {tracker.channel_id}")
+                logger.info(f"Loaded tracker for {tracker.token_name} in channel {channel_id}")
             except Exception as e:
                 logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
                 
@@ -1244,3 +1285,82 @@ async def stop(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Error in stop command: {str(e)}", exc_info=True)
         await interaction.response.send_message("Failed to process stop command. Please try again.", ephemeral=True)
+
+@TokenControls.command(name="track")
+@app_commands.describe(
+    policy_id="The policy ID of the token to track",
+    token_name="The name of the token",
+    image_url="URL to the token's image",
+    threshold="Minimum ADA amount for transaction notifications",
+    track_transfers="Whether to track token transfers (true/false)"
+)
+async def track_token(
+    interaction: discord.Interaction,
+    policy_id: str,
+    token_name: str,
+    image_url: str,
+    threshold: float = 100.0,
+    track_transfers: bool = False
+):
+    """Track a new token in this channel"""
+    try:
+        # Get the channel from the interaction
+        channel = interaction.channel
+        if not channel or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("❌ This command can only be used in a text channel", ephemeral=True)
+            return
+
+        # Check if we have permission to send messages and embeds
+        perms = channel.permissions_for(interaction.guild.me)
+        if not perms.send_messages or not perms.embed_links:
+            await interaction.response.send_message("❌ I don't have permission to send messages or embeds in this channel", ephemeral=True)
+            return
+
+        # Validate policy ID format
+        if not re.match(r'^[0-9a-fA-F]{56}$', policy_id):
+            await interaction.response.send_message("❌ Invalid policy ID format. It should be a 56-character hexadecimal string.", ephemeral=True)
+            return
+
+        # Check if token is already being tracked
+        if policy_id in active_trackers:
+            await interaction.response.send_message(f"❌ {token_name} is already being tracked!", ephemeral=True)
+            return
+
+        # Create new tracker
+        tracker = TokenTracker(
+            policy_id=policy_id,
+            channel_id=channel.id,
+            token_name=token_name,
+            image_url=image_url,
+            threshold=threshold,
+            track_transfers=track_transfers,
+            last_block=None,  # Will be set on first check
+            trade_notifications=0,
+            transfer_notifications=0,
+            token_info=None  # Will be populated on first check
+        )
+
+        # Save to database
+        database.add_tracker(tracker)
+        
+        # Add to active trackers
+        active_trackers[policy_id] = tracker
+
+        # Send confirmation
+        embed = discord.Embed(
+            title="✅ Token Tracking Added",
+            description=f"Now tracking {token_name}",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Policy ID", value=f"```{policy_id}```", inline=False)
+        embed.add_field(name="Channel", value=f"<#{channel.id}>", inline=True)
+        embed.add_field(name="Threshold", value=f"{threshold:,.2f} ₳", inline=True)
+        embed.add_field(name="Track Transfers", value="Yes" if track_transfers else "No", inline=True)
+        embed.set_thumbnail(url=image_url)
+        
+        await interaction.response.send_message(embed=embed)
+        logger.info(f"Added tracker for {token_name} in channel {channel.id}")
+
+    except Exception as e:
+        logger.error(f"Error in track_token: {str(e)}", exc_info=True)
+        await interaction.response.send_message("❌ An error occurred while setting up token tracking", ephemeral=True)
