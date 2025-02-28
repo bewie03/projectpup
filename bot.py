@@ -107,6 +107,24 @@ async def init_redis():
                 logger.error("Max retries reached, Redis connection failed")
                 return False
 
+# Bot ready state in Redis
+async def set_bot_ready(ready: bool):
+    try:
+        if redis_client and redis_ready.is_set():
+            await redis_client.set("bot_ready", "1" if ready else "0")
+            logger.info(f"Bot ready state set to: {ready}")
+    except Exception as e:
+        logger.error(f"Error setting bot ready state: {e}")
+
+async def is_bot_ready():
+    try:
+        if redis_client and redis_ready.is_set():
+            state = await redis_client.get("bot_ready")
+            return state == "1"
+    except Exception as e:
+        logger.error(f"Error checking bot ready state: {e}")
+    return False
+
 # Initialize FastAPI app
 app = FastAPI()
 
