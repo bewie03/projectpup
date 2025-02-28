@@ -83,6 +83,10 @@ intents.guild_messages = True  # Required to send messages in guilds
 intents.members = True  # Required for member-related operations
 bot = commands.Bot(command_prefix='/', intents=intents)
 
+# Setup command tree
+tree = app_commands.CommandTree(bot)
+bot.tree = tree
+
 # Initialize Blockfrost API
 api = BlockFrostApi(
     project_id=os.getenv('BLOCKFROST_API_KEY'),
@@ -330,8 +334,11 @@ async def on_ready():
             except Exception as e:
                 logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
                 
-        # Sync slash commands
+        # Sync slash commands with all guilds
         await bot.tree.sync()
+        logger.info(f"Synced slash commands with Discord")
+        
+        # Log bot status
         logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
         
         # Log guild information
@@ -1005,12 +1012,13 @@ async def send_start_message(interaction, policy_id, token_name, threshold, trac
     await interaction.response.send_message(embed=embed, view=view)
 
 @bot.tree.command(name="start", description="Start tracking token purchases and transfers")
+@app_commands.default_permissions(administrator=True)
 async def start(interaction: discord.Interaction):
     """Start tracking a token by opening a setup form"""
     modal = TokenSetupModal()
     await interaction.response.send_modal(modal)
 
-@bot.tree.command(name="help")
+@bot.tree.command(name="help", description="Display help information about the bot's commands")
 async def help_command(interaction: discord.Interaction):
     """Display help information about the bot's commands"""
     embed = discord.Embed(
