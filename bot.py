@@ -20,46 +20,58 @@ import time
 import queue
 from queue import Queue
 
-# Placeholder for database module (implement as needed)
+# Placeholder for your database module
 class Database:
     def get_trackers(self):
-        return []  # Return list of tracker objects
-    def add_tracker(self, **kwargs):
+        # Should return list of tracker objects from your DB
+        return []
+    def add_tracker(self, policy_id, channel_id, token_name, image_url, threshold, track_transfers, token_info):
+        # Add tracker to DB
         pass
     def delete_token_tracker(self, policy_id, channel_id):
+        # Delete specific tracker
         pass
     def save_token_tracker(self, tracker_dict):
+        # Save/update tracker
         pass
     def remove_all_trackers_for_channel(self, channel_id):
+        # Remove all trackers for a channel
         pass
 
-database = Database()  # Replace with your actual database implementation
+database = Database()  # Replace with your actual implementation
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
-# Configure logging
+# Configure logging for both console and Heroku compatibility
 def setup_logging():
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    """Configure logging with separate handlers for info and errors"""
+    log_format = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
     info_handler = logging.StreamHandler(sys.stdout)
-    info_handler.setFormatter(formatter)
+    info_handler.setFormatter(log_format)
     info_handler.setLevel(logging.INFO)
     info_handler.addFilter(lambda record: record.levelno <= logging.INFO)
     error_handler = logging.StreamHandler(sys.stderr)
-    error_handler.setFormatter(formatter)
+    error_handler.setFormatter(log_format)
     error_handler.setLevel(logging.WARNING)
-    logger.handlers = [info_handler, error_handler]
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.handlers = []
+    logger.addHandler(info_handler)
+    logger.addHandler(error_handler)
     logger.info("Bot logging initialized")
     return logger
 
 logger = setup_logging()
 
-# Initialize FastAPI app
+# Initialize FastAPI app for webhook handling
 app = FastAPI()
-notification_queue = Queue()
+notification_queue = Queue()  # Thread-safe queue for webhook-to-bot communication
 
+# Add CORS middleware for webhook endpoint
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -68,25 +80,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Discord bot
+# Initialize Discord bot with necessary intents
 intents = discord.Intents.default()
 intents.message_content = True
-intents.guilds = True
+intents.guilds = True  # Ensure guild/channel info is available
 bot = commands.Bot(command_prefix='/', intents=intents)
 
-# Initialize Blockfrost API
+# Initialize Blockfrost API for Cardano blockchain data
 api = BlockFrostApi(
     project_id=os.getenv('BLOCKFROST_API_KEY'),
     base_url=ApiUrls.mainnet.value
 )
 
-# Webhook secret
+# Webhook secret and tolerance for signature verification
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
-WEBHOOK_TOLERANCE_SECONDS = 600
+WEBHOOK_TOLERANCE_SECONDS = 600  # 10 minutes, matching Blockfrost default
 
-# Active trackers
+# Dictionary to store active token trackers
 active_trackers = {}
 
+# TokenTracker class to manage tracking configuration
 class TokenTracker:
     def __init__(self, policy_id: str, channel_id: int, token_name: str = None, 
                  image_url: str = None, threshold: float = 1000.0, 
@@ -103,308 +116,532 @@ class TokenTracker:
         self.trade_notifications = trade_notifications
         self.transfer_notifications = transfer_notifications
         self.token_info = token_info or get_token_info(policy_id)
+        if self.token_info:
+            logger.info(f"Token {token_name} has {self.token_info.get('decimals', 0)} decimals")
+
+    def __str__(self):
+        return f"TokenTracker(policy_id={self.policy_id}, token_name={self.token_name}, channel_id={self.channel_id})"
 
     def increment_trade_notifications(self):
+        """Increment trade notification counter"""
         self.trade_notifications += 1
 
     def increment_transfer_notifications(self):
+        """Increment transfer notification counter"""
         self.transfer_notifications += 1
 
 def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> bool:
+    """Verify the Blockfrost webhook signature"""
     if not WEBHOOK_SECRET:
-        logger.warning("WEBHOOK_SECRET not set, skipping verification")
+        logger.warning("WEBHOOK_SECRET not set, skipping signature verification")
         return True
     try:
         pairs = dict(pair.split('=') for pair in header.split(','))
-        timestamp, signature = pairs['t'], pairs['v1']
-        if abs(current_time - int(timestamp)) > WEBHOOK_TOLERANCE_SECONDS:
-            logger.error(f"Webhook timestamp too old: {abs(current_time - int(timestamp))}s")
+        if 't' not in pairs or 'v1' not in pairs:
+            logger.error("Missing timestamp or signature in header")
             return False
+        timestamp = pairs['t']
+        signature = pairs['v1']
+        timestamp_diff = abs(current_time - int(timestamp))
+        if timestamp_diff > WEBHOOK_TOLERANCE_SECONDS:
+            logger.error(f"Webhook timestamp too old: {timestamp_diff} seconds")
+            return False
+        signature_payload = f"{timestamp}.{payload.decode('utf-8')}"
         computed = hmac.new(
             WEBHOOK_SECRET.encode(),
-            f"{timestamp}.{payload.decode('utf-8')}".encode(),
+            signature_payload.encode(),
             hashlib.sha256
         ).hexdigest()
         return hmac.compare_digest(computed, signature)
     except Exception as e:
-        logger.error(f"Signature verification error: {str(e)}", exc_info=True)
+        logger.error(f"Error verifying webhook signature: {str(e)}", exc_info=True)
         return False
 
 @app.post("/webhook/transaction")
 async def transaction_webhook(request: Request):
-    """Handle Blockfrost transaction webhooks"""
+    """Handle incoming transaction webhooks from Blockfrost"""
     try:
         logger.info("Received webhook request")
         signature = request.headers.get('Blockfrost-Signature')
         if not signature:
             logger.error("Missing Blockfrost-Signature header")
             raise HTTPException(status_code=400, detail="Missing signature header")
-
+        
         payload = await request.body()
+        logger.debug(f"Raw payload size: {len(payload)} bytes")
+        
         current_time = int(time.time())
         if not verify_webhook_signature(payload, signature, current_time):
             logger.error("Invalid webhook signature")
             raise HTTPException(status_code=401, detail="Invalid signature")
-
+        
         data = await request.json()
+        tx_count = len(data.get('payload', []))
+        logger.info(f"Webhook contains {tx_count} transaction(s)")
+        
         if not isinstance(data, dict) or 'type' not in data or data['type'] != 'transaction':
-            logger.error(f"Invalid webhook type: {data.get('type', 'unknown')}")
+            logger.error(f"Invalid webhook data format: {data.get('type', 'unknown type')}")
             return {"status": "ignored"}
-
+        
         transactions = data.get('payload', [])
-        logger.info(f"Webhook contains {len(transactions)} transactions")
-
+        if not transactions:
+            logger.info("Webhook contains no transactions")
+            return {"status": "no transactions"}
+        
         for tx_data in transactions:
             tx = tx_data.get('tx', {})
             tx_hash = tx.get('hash', 'unknown')
+            logger.info(f"Processing transaction: {tx_hash}")
+            
             inputs = tx_data.get('inputs', [])
             outputs = tx_data.get('outputs', [])
-            if not all([tx, inputs, outputs]):
-                logger.warning(f"Skipping tx {tx_hash} - missing data")
+            if not tx or not inputs or not outputs:
+                logger.warning(f"Skipping transaction {tx_hash} - Missing required data")
                 continue
-
+            
             trackers = database.get_trackers()
+            logger.info(f"Checking transaction against {len(trackers)} tracked tokens")
+            
             for tracker in trackers:
                 tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
                 if tracker_key not in active_trackers:
-                    logger.warning(f"Tracker {tracker_key} not in memory")
+                    logger.warning(f"Tracker {tracker_key} not found in memory, skipping")
                     continue
                 active_tracker = active_trackers[tracker_key]
-
+                
                 is_involved = False
-                for io_list in (inputs, outputs):
-                    for io in io_list:
-                        for amt in io.get('amount', []):
-                            unit = amt.get('unit', '')
-                            if unit != 'lovelace' and len(unit) >= 56 and unit[:56].lower() == tracker.policy_id.lower():
-                                is_involved = True
-                                break
-                        if is_involved:
+                input_addresses = []
+                for inp in inputs:
+                    input_addresses.append(inp.get('address', ''))
+                    for amt in inp.get('amount', []):
+                        unit = amt.get('unit', '')
+                        if unit == 'lovelace':
+                            continue
+                        logger.info(f"Checking input unit: {unit} against policy: {tracker.policy_id}")
+                        if len(unit) >= 56 and unit[:56].lower() == tracker.policy_id.lower():
+                            is_involved = True
+                            logger.info(f"Found token {active_tracker.token_name} in transaction inputs")
                             break
                     if is_involved:
                         break
-
+                
+                if not is_involved:
+                    output_addresses = []
+                    for out in outputs:
+                        output_addresses.append(out.get('address', ''))
+                        for amt in out.get('amount', []):
+                            unit = amt.get('unit', '')
+                            if unit == 'lovelace':
+                                continue
+                            logger.info(f"Checking output unit: {unit} against policy: {tracker.policy_id}")
+                            if len(unit) >= 56 and unit[:56].lower() == tracker.policy_id.lower():
+                                is_involved = True
+                                logger.info(f"Found token {active_tracker.token_name} in transaction outputs")
+                                break
+                        if is_involved:
+                            break
+                
                 if is_involved:
-                    analysis_data = {'inputs': inputs, 'outputs': outputs, 'tx': tx}
-                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, tracker.policy_id)
+                    logger.info(f"Analyzing transaction for {active_tracker.token_name} ({active_tracker.policy_id})")
+                    analysis_data = {
+                        'inputs': inputs,
+                        'outputs': outputs,
+                        'tx': tx
+                    }
+                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, active_tracker.policy_id)
                     details['hash'] = tx_hash
+                    logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
+                    
                     notification_data = {
                         'tx_details': analysis_data,
-                        'policy_id': tracker.policy_id,
+                        'policy_id': active_tracker.policy_id,
                         'ada_amount': ada_amount,
                         'token_amount': token_amount,
-                        'analysis_details': {'type': tx_type, 'hash': tx_hash, **details},
+                        'analysis_details': {
+                            'type': tx_type,
+                            'hash': tx_hash,
+                            **details
+                        },
                         'tracker': active_tracker
                     }
                     notification_queue.put(notification_data)
-                    logger.info(f"Queued notification for {tracker.token_name} ({tx_hash})")
-
-        return {"status": "success", "message": "Notifications queued"}
+                    logger.debug(f"Queued notification: {json.dumps(notification_data, default=str)[:1000]}...")
+        
+        return {"status": "success", "message": "Notification queued"}
     except Exception as e:
-        logger.error(f"Webhook error: {str(e)}", exc_info=True)
+        logger.error(f"Error in webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @tasks.loop(seconds=1)
 async def process_notification_queue():
-    """Process queued notifications"""
+    """Process any pending notifications in the queue"""
     try:
         while not notification_queue.empty():
             data = notification_queue.get_nowait()
             try:
+                tx_details = data['tx_details']
+                tracker = data['tracker']
+                ada_amount = data['ada_amount']
+                token_amount = data['token_amount']
+                analysis_details = data['analysis_details']
+                
                 await send_transaction_notification(
-                    tracker=data['tracker'],
-                    tx_type=data['analysis_details']['type'],
-                    ada_amount=data['ada_amount'],
-                    token_amount=data['token_amount'],
-                    details=data['analysis_details']
+                    tracker=tracker,
+                    tx_type=analysis_details['type'],
+                    ada_amount=ada_amount,
+                    token_amount=token_amount,
+                    details=analysis_details
                 )
                 notification_queue.task_done()
             except Exception as e:
-                logger.error(f"Notification processing error: {str(e)}", exc_info=True)
+                logger.error(f"Error processing notification: {str(e)}", exc_info=True)
                 notification_queue.task_done()
     except Exception as e:
-        logger.error(f"Queue loop error: {str(e)}", exc_info=True)
+        logger.error(f"Error in notification queue loop: {str(e)}", exc_info=True)
 
 @bot.event
 async def on_ready():
-    """Bot startup"""
+    """Called when the bot is ready"""
     try:
         if not process_notification_queue.is_running():
             process_notification_queue.start()
-            logger.info("Started notification queue processor")
-
+            logger.info("Notification queue processor started")
+        
         trackers = database.get_trackers()
+        logger.info(f"Loading {len(trackers)} trackers from database")
+        
         for tracker in trackers:
-            tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
-            active_trackers[tracker_key] = TokenTracker(
-                policy_id=tracker.policy_id,
-                channel_id=int(tracker.channel_id),
-                token_name=tracker.token_name,
-                image_url=tracker.image_url,
-                threshold=tracker.threshold,
-                track_transfers=tracker.track_transfers,
-                last_block=tracker.last_block,
-                trade_notifications=tracker.trade_notifications,
-                transfer_notifications=tracker.transfer_notifications,
-                token_info=tracker.token_info
-            )
-            logger.info(f"Loaded tracker for {tracker.token_name} in channel {tracker.channel_id}")
-
+            try:
+                tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
+                active_trackers[tracker_key] = TokenTracker(
+                    policy_id=tracker.policy_id,
+                    channel_id=int(tracker.channel_id),
+                    token_name=tracker.token_name,
+                    image_url=tracker.image_url,
+                    threshold=tracker.threshold,
+                    track_transfers=tracker.track_transfers,
+                    last_block=tracker.last_block,
+                    trade_notifications=tracker.trade_notifications,
+                    transfer_notifications=tracker.transfer_notifications,
+                    token_info=tracker.token_info
+                )
+                logger.info(f"Loaded tracker for {tracker.token_name} in channel {tracker.channel_id}")
+            except Exception as e:
+                logger.error(f"Error loading tracker {tracker.policy_id}: {str(e)}", exc_info=True)
+        
         await bot.tree.sync()
-        logger.info(f"Bot ready! Loaded {len(active_trackers)} trackers")
+        logger.info(f"Bot is ready! Loaded {len(active_trackers)} trackers")
+        
         for guild in bot.guilds:
-            logger.info(f"Guild: {guild.name} (ID: {guild.id}), Channels: {[c.name for c in guild.channels]}")
+            logger.info(f"Connected to guild: {guild.name} (ID: {guild.id})")
+            logger.info(f"Available channels: {[f'{c.name} (ID: {c.id})' for c in guild.channels]}")
     except Exception as e:
-        logger.error(f"on_ready error: {str(e)}", exc_info=True)
+        logger.error(f"Error in on_ready: {str(e)}", exc_info=True)
 
 def get_token_info(policy_id: str):
-    """Get token metadata"""
+    """Get token information including metadata and decimals"""
     try:
         assets = api.assets_policy(policy_id)
+        if isinstance(assets, Exception):
+            raise assets
         if not assets:
             return None
-        asset = api.asset(assets[0].asset)
-        metadata = vars(asset) if not isinstance(asset, Exception) else {}
-        onchain_metadata = metadata.get('onchain_metadata', {})
-        decimals = onchain_metadata.get('decimals', metadata.get('metadata', {}).get('decimals', 0))
+        
+        asset = assets[0]
+        metadata = api.asset(asset.asset)
+        if isinstance(metadata, Exception):
+            raise metadata
+        
+        def namespace_to_dict(obj):
+            if hasattr(obj, '__dict__'):
+                return {k: namespace_to_dict(v) for k, v in vars(obj).items()}
+            elif isinstance(obj, (list, tuple)):
+                return [namespace_to_dict(x) for x in obj]
+            elif isinstance(obj, dict):
+                return {k: namespace_to_dict(v) for k, v in obj.items()}
+            else:
+                return obj
+        
+        metadata_dict = namespace_to_dict(metadata)
+        onchain_metadata = metadata_dict.get('onchain_metadata', {})
+        
+        decimals = None
+        if onchain_metadata and isinstance(onchain_metadata, dict):
+            decimals = onchain_metadata.get('decimals')
+        if decimals is None and 'metadata' in metadata_dict:
+            decimals = metadata_dict['metadata'].get('decimals')
+        if decimals is None:
+            decimals = 0
+            logger.info(f"No decimal info for {asset.asset}, defaulting to 0")
+        else:
+            logger.info(f"Found {decimals} decimals for {asset.asset}")
+        
         return {
             'asset': asset.asset,
             'policy_id': policy_id,
-            'name': metadata.get('asset_name', 'Unknown'),
+            'name': metadata_dict.get('asset_name'),
             'decimals': int(decimals),
             'metadata': onchain_metadata
         }
     except Exception as e:
-        logger.error(f"Token info error for {policy_id}: {str(e)}", exc_info=True)
+        logger.error(f"Error getting token info: {str(e)}", exc_info=True)
         return None
 
 def format_token_amount(amount: int, decimals: int) -> str:
-    """Format token amount with decimals"""
+    """Format token amount considering decimals"""
     if decimals == 0:
         return f"{amount:,}"
     formatted = amount / (10 ** decimals)
-    return f"{formatted:,.{min(decimals, 6)}f}" if formatted < 1000 else f"{formatted:,.2f}"
+    if decimals <= 2:
+        return f"{formatted:,.{decimals}f}"
+    elif formatted >= 1000:
+        return f"{formatted:,.2f}"
+    else:
+        return f"{formatted:,.{min(decimals, 6)}f}"
+
+def get_transaction_details(api: BlockFrostApi, tx_hash: str):
+    """Fetch detailed transaction information"""
+    try:
+        logger.info(f"Fetching transaction details for tx_hash: {tx_hash}")
+        tx = api.transaction(tx_hash)
+        if isinstance(tx, Exception):
+            raise tx
+        logger.debug(f"Transaction details retrieved: {tx_hash}")
+        
+        utxos = api.transaction_utxos(tx_hash)
+        if isinstance(utxos, Exception):
+            raise utxos
+        logger.debug(f"Transaction UTXOs retrieved: {tx_hash}")
+        
+        metadata = api.transaction_metadata(tx_hash)
+        if isinstance(metadata, Exception):
+            raise metadata
+        logger.debug(f"Transaction metadata retrieved: {tx_hash}")
+        
+        return tx, utxos, metadata
+    except ApiError as e:
+        logger.error(f"Blockfrost API error: {str(e)}")
+        return None, None, None
+    except Exception as e:
+        logger.error(f"Unexpected error in get_transaction_details: {str(e)}", exc_info=True)
+        return None, None, None
 
 def analyze_transaction_improved(tx_details, policy_id):
-    """Analyze transaction"""
+    """Enhanced transaction analysis"""
     try:
         inputs = tx_details.get('inputs', [])
         outputs = tx_details.get('outputs', [])
-        token_info = get_token_info(policy_id)
-        decimals = token_info.get('decimals', 0) if token_info else 0
+        if not inputs and not outputs:
+            logger.warning("No inputs/outputs found in transaction")
+            return 'unknown', 0, 0, {}
 
         ada_in, ada_out, token_in, token_out = 0, 0, 0, 0
+        token_info = get_token_info(policy_id)
+        decimals = token_info.get('decimals', 0) if token_info else 0
+        full_asset_name = f"{policy_id}{token_info['name']}" if token_info and 'name' in token_info else None
+        
         for inp in inputs:
-            for amt in inp.get('amount', []):
-                if amt['unit'] == 'lovelace':
-                    ada_in += int(amt['quantity'])
-                elif amt['unit'].startswith(policy_id):
-                    token_in += int(amt['quantity'])
+            for amount in inp.get('amount', []):
+                unit = amount.get('unit', '')
+                logger.debug(f"Checking input unit: {unit}")
+                if full_asset_name and unit == full_asset_name or unit.startswith(policy_id):
+                    raw_amount = int(amount['quantity'])
+                    token_in += raw_amount
+                    logger.info(f"Found {raw_amount} tokens in input with unit {unit}")
+                elif unit == 'lovelace':
+                    ada_in += int(amount['quantity'])
 
         for out in outputs:
-            for amt in out.get('amount', []):
-                if amt['unit'] == 'lovelace':
-                    ada_out += int(amt['quantity'])
-                elif amt['unit'].startswith(policy_id):
-                    token_out += int(amt['quantity'])
+            for amount in out.get('amount', []):
+                unit = amount.get('unit', '')
+                logger.debug(f"Checking output unit: {unit}")
+                if full_asset_name and unit == full_asset_name or unit.startswith(policy_id):
+                    raw_amount = int(amount['quantity'])
+                    token_out += raw_amount
+                    logger.info(f"Found {raw_amount} tokens in output with unit {unit}")
+                elif unit == 'lovelace':
+                    ada_out += int(amount['quantity'])
 
-        ada_amount = abs(ada_out - ada_in) / 1_000_000
-        token_amount = abs(token_out - token_in) / (10 ** decimals) if decimals else abs(token_out - token_in)
-        if token_in and token_out:
-            tx_type = 'wallet_transfer'
-            token_amount = max([int(out.get('amount', [{}])[0].get('quantity', 0)) for out in outputs if out.get('amount', [{}])[0].get('unit', '').startswith(policy_id)]) / (10 ** decimals)
-        elif token_in:
-            tx_type = 'sell'
-        elif token_out:
-            tx_type = 'buy'
+        ada_in = ada_in / 1_000_000
+        ada_out = ada_out / 1_000_000
+
+        ada_amount = abs(ada_out - ada_in)
+        if token_in > 0 and token_out > 0:
+            max_output = 0
+            for out in outputs:
+                for amount in out.get('amount', []):
+                    unit = amount.get('unit', '')
+                    if full_asset_name and unit == full_asset_name or unit.startswith(policy_id):
+                        output_amount = int(amount['quantity'])
+                        max_output = max(max_output, output_amount)
+            raw_token_amount = max_output
+            logger.info(f"Wallet transfer - using largest output amount: {raw_token_amount}")
         else:
-            tx_type = 'unknown'
+            raw_token_amount = abs(token_out - token_in)
+            logger.info(f"Buy/Sell - using difference: {raw_token_amount}")
+        
+        token_amount = raw_token_amount / (10 ** decimals) if decimals > 0 else raw_token_amount
+        logger.info(f"Raw token amount: {raw_token_amount}, Decimals: {decimals}, Converted: {token_amount}")
 
-        return tx_type, ada_amount, token_amount, {
-            'ada_in': ada_in / 1_000_000, 'ada_out': ada_out / 1_000_000,
-            'token_in': token_in, 'token_out': token_out,
-            'raw_token_amount': token_amount * (10 ** decimals), 'decimals': decimals
+        logger.info(f"Token input: {token_in}, Token output: {token_out}")
+        logger.info(f"ADA input: {ada_in}, ADA output: {ada_out}")
+
+        details = {
+            'ada_in': ada_in,
+            'ada_out': ada_out,
+            'token_in': token_in,
+            'token_out': token_out,
+            'raw_token_amount': raw_token_amount,
+            'decimals': decimals,
+            'full_asset_name': full_asset_name
         }
+
+        if token_in > 0 and token_out > 0:
+            return 'wallet_transfer', ada_amount, token_amount, details
+        elif token_in > 0 and token_out == 0:
+            return 'sell', ada_amount, token_amount, details
+        elif token_in == 0 and token_out > 0:
+            return 'buy', ada_amount, token_amount, details
+        else:
+            return 'unknown', 0, 0, details
     except Exception as e:
-        logger.error(f"Transaction analysis error: {str(e)}", exc_info=True)
+        logger.error(f"Error analyzing transaction: {str(e)}", exc_info=True)
         return 'unknown', 0, 0, {}
 
 async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tracker, analysis_details):
-    """Create trade embed"""
+    """Creates a detailed embed for DEX trades"""
     try:
-        tx_type = analysis_details['type']
+        trade_type = analysis_details.get("type", "unknown")
+        title_emoji = "💰" if trade_type == "buy" else "💱"
+        action_word = "Purchase" if trade_type == "buy" else "Sale"
+        
         embed = discord.Embed(
-            title=f"{'💰' if tx_type == 'buy' else '💱'} Token {tx_type.capitalize()} Detected",
-            description=f"Transaction Hash: [`{tx_details.get('hash', '')[:8]}...`](https://cardanoscan.io/transaction/{tx_details.get('hash', '')})",
-            color=discord.Color.green() if tx_type == 'buy' else discord.Color.blue()
+            title=f"{title_emoji} Token {action_word} Detected",
+            description=f"Transaction Hash: [`{tx_details.get('hash', '')[:8]}...{tx_details.get('hash', '')[-8:]}`](https://pool.pm/tx/{tx_details.get('hash', '')})",
+            color=discord.Color.green() if trade_type == "buy" else discord.Color.blue()
         )
-        embed.add_field(
-            name="📝 Overview",
-            value=f"```\nType: DEX {tx_type.capitalize()}\nStatus: Confirmed\n```",
-            inline=True
+
+        overview = (
+            "```\n"
+            f"Type     : DEX {action_word}\n"
+            f"Status   : Confirmed\n"
+            f"Addresses: {len(tx_details.get('inputs', [])) + len(tx_details.get('outputs', []))}\n"
+            "```"
         )
-        trade_info = (
-            f"```\n{'ADA Spent' if tx_type == 'buy' else 'ADA Received'}: {ada_amount:,.2f}\n"
-            f"{'Tokens Received' if tx_type == 'buy' else 'Tokens Sold'}: {format_token_amount(int(token_amount * (10 ** tracker.token_info.get('decimals', 0))), tracker.token_info.get('decimals', 0))}\n"
-            f"Price/Token: {(ada_amount / token_amount):.6f}\n```"
-        )
+        embed.add_field(name="📝 Overview", value=overview, inline=True)
+
+        if trade_type == "buy":
+            trade_info = (
+                "```\n"
+                f"ADA Spent  : {ada_amount:,.2f}\n"
+                f"Tokens Recv: {format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}\n"
+                f"Price/Token: {(ada_amount/token_amount):.6f}\n"
+                "```"
+            )
+        else:
+            trade_info = (
+                "```\n"
+                f"Tokens Sold: {format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}\n"
+                f"ADA Recv   : {ada_amount:,.2f}\n"
+                f"Price/Token: {(ada_amount/token_amount):.6f}\n"
+                "```"
+            )
         embed.add_field(name="💰 Trade Details", value=trade_info, inline=True)
+
+        if tracker.token_info:
+            token_name = tracker.token_info.get('name', 'Unknown Token')
+            embed.set_author(name=token_name)
+            if tracker.image_url:
+                embed.set_thumbnail(url=tracker.image_url)
+
+        input_addresses = [inp.get('address', '') for inp in tx_details.get('inputs', [])]
+        output_addresses = [out.get('address', '') for out in tx_details.get('outputs', [])]
+        address_layout = []
+        in_addrs = ["📥 Input Addresses:"] + [f"{addr[:8]}..." for addr in input_addresses[:3]]
+        if len(input_addresses) > 3:
+            in_addrs.append(f"...and {len(input_addresses) - 3} more")
+        out_addrs = ["📤 Output Addresses:"] + [f"{addr[:8]}..." for addr in output_addresses[:3]]
+        if len(output_addresses) > 3:
+            out_addrs.append(f"...and {len(output_addresses) - 3} more")
+        
+        max_lines = max(len(in_addrs), len(out_addrs))
+        for i in range(max_lines):
+            left = in_addrs[i] if i < len(in_addrs) else ""
+            right = out_addrs[i] if i < len(out_addrs) else ""
+            address_layout.append(f"{left:<40} {right}")
+        
+        if address_layout:
+            embed.add_field(name="🔍 Addresses", value="\n".join(address_layout), inline=False)
+
         embed.add_field(name="🔑 Policy ID", value=f"```{policy_id}```", inline=False)
-        embed.set_author(name=tracker.token_name)
-        if tracker.image_url:
-            embed.set_thumbnail(url=tracker.image_url)
-        embed.set_footer(text=f"Detected at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        embed.set_footer(text=f"Transaction detected at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
         return embed
     except Exception as e:
-        logger.error(f"Trade embed error: {str(e)}", exc_info=True)
+        logger.error(f"Error creating trade embed: {str(e)}", exc_info=True)
         return None
 
 async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
-    """Create transfer embed"""
+    """Creates an embed for token transfer notifications"""
     try:
         embed = discord.Embed(
             title="↔️ Token Transfer Detected",
-            description="Tokens transferred between wallets.",
+            description="Tokens have been transferred between wallets.",
             color=discord.Color.blue()
         )
-        from_addr = tx_details.get('inputs', [{}])[0].get('address', 'Unknown')
-        to_addr = tx_details.get('outputs', [{}])[0].get('address', 'Unknown')
+        from_address = tx_details.get('inputs', [{}])[0].get('address', '')
+        to_address = tx_details.get('outputs', [{}])[0].get('address', '')
+        
+        transfer_details = (
+            f"**From:** ```{from_address[:20]}...{from_address[-8:]}```\n"
+            f"**To:** ```{to_address[:20]}...{to_address[-8:]}```\n"
+            f"**Amount:** ```{format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))} Tokens```"
+        )
+        embed.add_field(name="🔄 Transfer Details", value=transfer_details, inline=False)
+        
+        wallet_links = (
+            f"[View Sender Wallet](https://cardanoscan.io/address/{from_address})\n"
+            f"[View Receiver Wallet](https://cardanoscan.io/address/{to_address})"
+        )
+        embed.add_field(name="👤 Wallet Profiles", value=wallet_links, inline=False)
+        
         embed.add_field(
-            name="🔄 Transfer Details",
-            value=f"**From:** ```{from_addr[:20]}...{from_addr[-8:]}```\n**To:** ```{to_addr[:20]}...{to_addr[-8:]}```\n**Amount:** ```{format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}```",
+            name="🔍 Transaction Details",
+            value=f"[View on CardanoScan](https://cardanoscan.io/transaction/{tx_details.get('hash', '')})",
             inline=False
         )
-        embed.add_field(
-            name="👤 Wallet Profiles",
-            value=f"[Sender](https://cardanoscan.io/address/{from_addr})\n[Receiver](https://cardanoscan.io/address/{to_addr})",
-            inline=False
-        )
-        embed.add_field(
-            name="🔍 Transaction",
-            value=f"[View](https://cardanoscan.io/transaction/{tx_details.get('hash', '')})",
-            inline=False
-        )
-        if tracker.image_url:
-            embed.set_thumbnail(url=tracker.image_url)
+        
+        embed.set_thumbnail(url=tracker.image_url)
         embed.timestamp = discord.utils.utcnow()
+        embed.set_footer(text=f"Transfer detected at • Block #{tx_details.get('block_height', '')}")
+        
         return embed
     except Exception as e:
-        logger.error(f"Transfer embed error: {str(e)}", exc_info=True)
+        logger.error(f"Error creating transfer embed: {str(e)}", exc_info=True)
         return None
 
+def shorten_address(address):
+    """Shortens a Cardano address for display"""
+    if not address:
+        return "Unknown"
+    return address[:8] + "..." + address[-4:] if len(address) > 12 else address
+
 async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
-    """Send transaction notification"""
+    """Send a notification about a transaction to the appropriate Discord channel"""
     try:
         if tx_type == 'wallet_transfer' and not tracker.track_transfers:
-            return
-        decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
-        if token_amount < tracker.threshold:
-            logger.info(f"Amount {token_amount:,.{decimals}f} below threshold {tracker.threshold}")
+            logger.info("Transfer tracking disabled, skipping notification")
             return
 
+        decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
+        human_readable_amount = token_amount
+        if human_readable_amount < tracker.threshold:
+            logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}")
+            return
+        
         channel = bot.get_channel(tracker.channel_id)
         if not channel:
-            logger.warning(f"Channel {tracker.channel_id} not cached, fetching...")
+            logger.warning(f"Channel {tracker.channel_id} not in cache, attempting to fetch")
             try:
                 channel = await bot.fetch_channel(tracker.channel_id)
             except discord.NotFound:
@@ -415,25 +652,40 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
                 database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
                 return
             except discord.Forbidden:
-                logger.error(f"No access to channel {tracker.channel_id}")
+                logger.error(f"Bot does not have permission to access channel {tracker.channel_id}")
                 return
-
-        embed = None
+            except Exception as e:
+                logger.error(f"Error fetching channel {tracker.channel_id}: {str(e)}", exc_info=True)
+                return
+        
+        if not channel:
+            logger.error(f"Failed to resolve channel {tracker.channel_id}")
+            return
+        
         if tx_type in ['buy', 'sell']:
             embed = await create_trade_embed(details, tracker.policy_id, ada_amount, token_amount, tracker, details)
             if embed:
-                await channel.send(embed=embed)
-                tracker.increment_trade_notifications()
-        elif tx_type == 'wallet_transfer':
+                try:
+                    await channel.send(embed=embed)
+                    tracker.increment_trade_notifications()
+                    logger.info(f"Sent trade notification to channel {tracker.channel_id}")
+                except discord.Forbidden:
+                    logger.error(f"No permission to send messages in channel {tracker.channel_id}")
+                except Exception as e:
+                    logger.error(f"Error sending trade notification: {str(e)}")
+        elif tx_type == 'wallet_transfer' and tracker.track_transfers:
             embed = await create_transfer_embed(details, tracker.policy_id, token_amount, tracker)
             if embed:
-                await channel.send(embed=embed)
-                tracker.increment_transfer_notifications()
-        logger.info(f"Sent {tx_type} notification to {tracker.channel_id}")
-    except discord.Forbidden:
-        logger.error(f"No permission for channel {tracker.channel_id}")
+                try:
+                    await channel.send(embed=embed)
+                    tracker.increment_transfer_notifications()
+                    logger.info(f"Sent transfer notification to channel {tracker.channel_id}")
+                except discord.Forbidden:
+                    logger.error(f"No permission to send messages in channel {tracker.channel_id}")
+                except Exception as e:
+                    logger.error(f"Error sending transfer notification: {str(e)}")
     except Exception as e:
-        logger.error(f"Send notification error: {str(e)}", exc_info=True)
+        logger.error(f"Error sending transaction notification: {str(e)}", exc_info=True)
 
 class TokenControls(discord.ui.View):
     def __init__(self, policy_id):
@@ -442,57 +694,110 @@ class TokenControls(discord.ui.View):
 
     @discord.ui.button(label="Stop Tracking", style=discord.ButtonStyle.danger, emoji="⛔")
     async def stop_tracking(self, interaction: discord.Interaction, button: discord.ui.Button):
-        tracker_key = f"{self.policy_id}:{interaction.channel_id}"
-        if tracker_key in active_trackers:
-            database.delete_token_tracker(self.policy_id, interaction.channel_id)
-            del active_trackers[tracker_key]
-            embed = discord.Embed(
-                title="✅ Tracking Stopped",
-                description=f"Stopped tracking: ```{self.policy_id}```",
-                color=discord.Color.green()
-            )
-            for child in self.children:
-                child.disabled = True
-            await interaction.response.edit_message(embed=embed, view=self)
-            logger.info(f"Stopped tracking {self.policy_id}")
-        else:
-            await interaction.response.send_message("Not tracking this token.", ephemeral=True)
+        try:
+            tracker_key = f"{self.policy_id}:{interaction.channel_id}"
+            if tracker_key in active_trackers:
+                database.delete_token_tracker(self.policy_id, interaction.channel_id)
+                del active_trackers[tracker_key]
+                embed = discord.Embed(
+                    title="✅ Token Tracking Stopped",
+                    description=f"Stopped tracking token with policy ID: ```{self.policy_id}```",
+                    color=discord.Color.green()
+                )
+                for child in self.children:
+                    child.disabled = True
+                await interaction.response.edit_message(embed=embed, view=self)
+                logger.info(f"Stopped tracking token: {self.policy_id}")
+            else:
+                await interaction.response.send_message("Not tracking this token anymore.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error stopping token tracking: {str(e)}", exc_info=True)
+            await interaction.response.send_message("Failed to stop tracking.", ephemeral=True)
 
     @discord.ui.button(label="Toggle Transfers", style=discord.ButtonStyle.primary, emoji="🔄")
     async def toggle_transfers(self, interaction: discord.Interaction, button: discord.ui.Button):
-        tracker_key = f"{self.policy_id}:{interaction.channel_id}"
-        if tracker_key not in active_trackers:
-            await interaction.response.send_message("Tracker not found.", ephemeral=True)
-            return
-        tracker = active_trackers[tracker_key]
-        tracker.track_transfers = not tracker.track_transfers
-        database.save_token_tracker({
-            'policy_id': tracker.policy_id,
-            'token_name': tracker.token_name,
-            'image_url': tracker.image_url,
-            'threshold': tracker.threshold,
-            'channel_id': tracker.channel_id,
-            'last_block': tracker.last_block,
-            'track_transfers': tracker.track_transfers,
-            'token_info': tracker.token_info
-        })
-        embed = discord.Embed(
-            title="✅ Tracking Active",
-            description=f"**Policy ID:** ```{tracker.policy_id}```\n**Name:** ```{tracker.token_name}```\n**Threshold:** ```{tracker.threshold:,.2f}```\n**Transfers:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n**Trades:** ```{tracker.trade_notifications}```\n**Transfers:** ```{tracker.transfer_notifications}```",
-            color=discord.Color.blue()
-        )
-        if tracker.image_url:
-            embed.set_thumbnail(url=tracker.image_url)
-        await interaction.response.edit_message(embed=embed)
+        try:
+            tracker_key = f"{self.policy_id}:{interaction.channel_id}"
+            tracker = active_trackers.get(tracker_key)
+            if not tracker:
+                await interaction.response.send_message("Token tracker not found.", ephemeral=True)
+                return
+            tracker.track_transfers = not tracker.track_transfers
+            database.save_token_tracker({
+                'policy_id': self.policy_id,
+                'token_name': tracker.token_name,
+                'image_url': tracker.image_url,
+                'threshold': tracker.threshold,
+                'channel_id': interaction.channel_id,
+                'last_block': tracker.last_block,
+                'track_transfers': tracker.track_transfers,
+                'token_info': tracker.token_info
+            })
+            embed = discord.Embed(
+                title="✅ Token Tracking Active",
+                description="Currently tracking the following token:",
+                color=discord.Color.blue()
+            )
+            token_text = (
+                f"**Policy ID:** ```{tracker.policy_id}```\n"
+                f"**Name:** ```{tracker.token_name}```"
+            )
+            embed.add_field(name="Token Information", value=token_text, inline=False)
+            config_text = (
+                f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
+                f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
+            )
+            embed.add_field(name="", value=config_text, inline=False)
+            stats_text = (
+                f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
+                f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
+            )
+            embed.add_field(name="", value=stats_text, inline=False)
+            if tracker.image_url:
+                embed.set_thumbnail(url=tracker.image_url)
+            await interaction.response.edit_message(embed=embed)
+            logger.info(f"Toggled transfers for {tracker.token_name} to {tracker.track_transfers}")
+        except Exception as e:
+            logger.error(f"Error toggling transfers: {str(e)}", exc_info=True)
+            await interaction.response.send_message("Failed to toggle transfers.", ephemeral=True)
 
 class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
     def __init__(self):
         super().__init__()
-        self.policy_id = discord.ui.TextInput(label="Policy ID", placeholder="Enter policy ID", required=True, min_length=56, max_length=56)
-        self.token_name = discord.ui.TextInput(label="Token Name", placeholder="Enter token name", required=True)
-        self.image_url = discord.ui.TextInput(label="Image URL", placeholder="Optional image URL", required=False)
-        self.threshold = discord.ui.TextInput(label="Min Token Amount", placeholder="Default: 1000", required=False, default="1000")
-        self.track_transfers = discord.ui.TextInput(label="Track Transfers", placeholder="yes/no (default: yes)", required=False, default="yes")
+        self.policy_id = discord.ui.TextInput(
+            label="Policy ID",
+            placeholder="Enter the token's policy ID",
+            style=discord.TextStyle.short,
+            required=True,
+            min_length=56,
+            max_length=56
+        )
+        self.token_name = discord.ui.TextInput(
+            label="Token Name",
+            placeholder="Enter the token's name",
+            style=discord.TextStyle.short,
+            required=True
+        )
+        self.image_url = discord.ui.TextInput(
+            label="Image URL",
+            placeholder="Enter custom image URL (optional)",
+            style=discord.TextStyle.short,
+            required=False
+        )
+        self.threshold = discord.ui.TextInput(
+            label="Minimum Token Amount",
+            placeholder="Min tokens for notifications (default: 1000)",
+            style=discord.TextStyle.short,
+            required=False,
+            default="1000"
+        )
+        self.track_transfers = discord.ui.TextInput(
+            label="Track Transfers",
+            placeholder="Type 'yes' or 'no' (default: yes)",
+            style=discord.TextStyle.short,
+            required=False,
+            default="yes"
+        )
         self.add_item(self.policy_id)
         self.add_item(self.token_name)
         self.add_item(self.image_url)
@@ -500,18 +805,29 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
         self.add_item(self.track_transfers)
 
     async def on_submit(self, interaction: discord.Interaction):
+        """Handle form submission"""
         try:
             token_info = get_token_info(self.policy_id.value)
             if not token_info:
-                await interaction.response.send_message("Invalid policy ID", ephemeral=True)
+                await interaction.response.send_message(
+                    "❌ Could not find token with that policy ID.",
+                    ephemeral=True
+                )
                 return
-            threshold = float(self.threshold.value) if self.threshold.value else 1000.0
+            try:
+                threshold = float(self.threshold.value) if self.threshold.value else 1000.0
+            except ValueError:
+                await interaction.response.send_message(
+                    "❌ Invalid threshold value.",
+                    ephemeral=True
+                )
+                return
             track_transfers = self.track_transfers.value.lower() != 'no'
             tracker = TokenTracker(
                 policy_id=self.policy_id.value,
                 channel_id=interaction.channel_id,
                 token_name=self.token_name.value,
-                image_url=self.image_url.value or None,
+                image_url=self.image_url.value if self.image_url.value else None,
                 threshold=threshold,
                 track_transfers=track_transfers,
                 token_info=token_info
@@ -526,104 +842,185 @@ class TokenSetupModal(discord.ui.Modal, title="🪙 Token Setup"):
                 token_info=tracker.token_info
             )
             embed = discord.Embed(
-                title="✅ Tracking Started",
-                description=f"**Policy ID:** ```{tracker.policy_id}```\n**Name:** ```{tracker.token_name}```\n**Threshold:** ```{tracker.threshold:,.2f}```\n**Transfers:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```",
+                title="Token Tracking Started",
+                description="Successfully initialized tracking for:",
                 color=discord.Color.blue()
             )
+            embed.add_field(name="Token", value=f"```{tracker.token_name}```", inline=True)
+            embed.add_field(name="Policy ID", value=f"```{tracker.policy_id}```", inline=False)
+            config_text = (
+                f"**Threshold:** ```{threshold:,.2f} Tokens```\n"
+                f"**Transfer Notifications:** ```{'Enabled' if track_transfers else 'Disabled'}```\n"
+            )
+            embed.add_field(name="", value=config_text, inline=False)
+            stats_text = (
+                f"**Trade Notifications:** ```0```\n"
+                f"**Transfer Notifications:** ```0```\n"
+            )
+            embed.add_field(name="", value=stats_text, inline=False)
             if tracker.image_url:
                 embed.set_thumbnail(url=tracker.image_url)
             view = TokenControls(tracker.policy_id)
             await interaction.response.send_message(embed=embed, view=view)
             tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
             active_trackers[tracker_key] = tracker
-            logger.info(f"Started tracking {tracker.token_name}")
+            logger.info(f"Started tracking token: {tracker.token_name} ({tracker.policy_id})")
         except Exception as e:
-            logger.error(f"Setup error: {str(e)}", exc_info=True)
-            await interaction.response.send_message("Setup failed", ephemeral=True)
+            logger.error(f"Error in token setup: {str(e)}", exc_info=True)
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description="Failed to start tracking.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=error_embed)
 
-@bot.tree.command(name="start", description="Start tracking a token")
+@bot.tree.command(name="start", description="Start tracking token purchases and transfers")
 async def start(interaction: discord.Interaction):
-    await interaction.response.send_modal(TokenSetupModal())
+    """Start tracking a token by opening a setup form"""
+    modal = TokenSetupModal()
+    await interaction.response.send_modal(modal)
 
-@bot.tree.command(name="help", description="Show bot help")
+@bot.tree.command(name="help")
 async def help_command(interaction: discord.Interaction):
+    """Display help information about the bot's commands"""
     embed = discord.Embed(
         title="Help",
-        description="Track Cardano token transactions!",
+        description="Track Cardano token transactions with real-time notifications!",
         color=discord.Color.blue()
     )
     embed.add_field(
         name="📝 Commands",
-        value="**/start**: Start tracking\n**/status**: View trackers\n**/stop**: Stop all\n**/help**: This message",
+        value=(
+            "**`/start`**\nStart tracking a token's transactions\n\n"
+            "**`/status`**\nView tracked tokens and settings\n\n"
+            "**`/help`**\nShow this help message"
+        ),
         inline=False
     )
     embed.add_field(
-        name="🔍 Features",
-        value="• DEX Trades\n• Transfers\n• Real-time\n• Thresholds",
+        name="🔍 Monitoring Features",
+        value="• DEX Trade Detection\n• Wallet Transfer Tracking\n• Real-time Notifications\n• Customizable Thresholds",
         inline=True
     )
     embed.add_field(
-        name="🔔 Notifications",
-        value="• Amounts\n• Addresses\n• Hash",
+        name="🔔 Notifications Include",
+        value="• Trade Amount\n• Wallet Addresses\n• Transaction Hash",
         inline=True
     )
-    embed.set_footer(text="Contact admin for help.")
+    embed.set_footer(text="Need more help? Contact the bot administrator.")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="status", description="Show tracked tokens")
+@bot.tree.command(name="status", description="Show status of tracked tokens in this channel")
 @app_commands.default_permissions(administrator=True)
 async def status_command(interaction: discord.Interaction):
-    channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
-    if not channel_trackers:
-        await interaction.response.send_message("No trackers in this channel.", ephemeral=True)
-        return
-    for tracker in channel_trackers:
-        embed = discord.Embed(
-            title="✅ Tracking Active",
-            description=f"**Policy ID:** ```{tracker.policy_id}```\n**Name:** ```{tracker.token_name}```\n**Threshold:** ```{tracker.threshold:,.2f}```\n**Transfers:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n**Trades:** ```{tracker.trade_notifications}```\n**Transfers:** ```{tracker.transfer_notifications}```",
-            color=discord.Color.blue()
+    """Show status of tracked tokens in this channel"""
+    try:
+        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
+        if not channel_trackers:
+            embed = discord.Embed(
+                title="❌ No Active Trackers",
+                description="No tokens are currently being tracked in this channel.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        for tracker in channel_trackers:
+            embed = discord.Embed(
+                title="Token Tracking Active",
+                description="Currently tracking the following token:",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="Token",
+                value=f"```{tracker.token_name}```",
+                inline=True
+            )
+            embed.add_field(
+                name="Policy ID",
+                value=f"```{tracker.policy_id}```",
+                inline=False
+            )
+            config_text = (
+                f"**Threshold:** ```{tracker.threshold:,.2f} Tokens```\n"
+                f"**Transfer Notifications:** ```{'Enabled' if tracker.track_transfers else 'Disabled'}```\n"
+            )
+            embed.add_field(name="", value=config_text, inline=False)
+            stats_text = (
+                f"**Trade Notifications:** ```{tracker.trade_notifications}```\n"
+                f"**Transfer Notifications:** ```{tracker.transfer_notifications}```\n"
+            )
+            embed.add_field(name="", value=stats_text, inline=False)
+            if tracker.image_url:
+                embed.set_thumbnail(url=tracker.image_url)
+            view = TokenControls(tracker.policy_id)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    except Exception as e:
+        logger.error(f"Error in status command: {str(e)}", exc_info=True)
+        error_embed = discord.Embed(
+            title="❌ Error",
+            description="Failed to retrieve status.",
+            color=discord.Color.red()
         )
-        if tracker.image_url:
-            embed.set_thumbnail(url=tracker.image_url)
-        view = TokenControls(tracker.policy_id)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
-@bot.tree.command(name="stop", description="Stop all trackers in channel")
+@bot.tree.command(name="stop", description="Stop tracking all tokens in this channel")
 @app_commands.default_permissions(administrator=True)
 async def stop(interaction: discord.Interaction):
-    channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
-    if not channel_trackers:
-        await interaction.response.send_message("No trackers to stop.", ephemeral=True)
-        return
-    embed = discord.Embed(
-        title="⚠️ Stop Tracking",
-        description="Confirm stopping all trackers:",
-        color=discord.Color.yellow()
-    )
-    embed.add_field(name="Tokens", value="\n".join([f"• {t.token_name} (`{t.policy_id}`)" for t in channel_trackers]), inline=False)
+    """Stop tracking all tokens in this channel"""
+    try:
+        channel_trackers = [t for t in active_trackers.values() if t.channel_id == interaction.channel_id]
+        if not channel_trackers:
+            await interaction.response.send_message("No tokens are being tracked.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title="⚠️ Stop Token Tracking",
+            description="Are you sure you want to stop tracking all tokens in this channel?",
+            color=discord.Color.yellow()
+        )
+        tokens_list = "\n".join([f"• {t.token_name} (`{t.policy_id}`)" for t in channel_trackers])
+        embed.add_field(name="Tokens to remove:", value=tokens_list, inline=False)
 
-    class ConfirmView(discord.ui.View):
-        @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
-        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-            database.remove_all_trackers_for_channel(interaction.channel_id)
-            for key in list(active_trackers.keys()):
-                if active_trackers[key].channel_id == interaction.channel_id:
-                    del active_trackers[key]
-            embed = discord.Embed(title="✅ Stopped", description="All trackers stopped.", color=discord.Color.green())
-            for child in self.children:
-                child.disabled = True
-            await interaction.response.edit_message(embed=embed, view=self)
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
 
-        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-            embed = discord.Embed(title="❌ Cancelled", description="Tracking continues.", color=discord.Color.red())
-            for child in self.children:
-                child.disabled = True
-            await interaction.response.edit_message(embed=embed, view=self)
+            @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                try:
+                    database.remove_all_trackers_for_channel(interaction.channel_id)
+                    policies_to_remove = [k for k, v in active_trackers.items() if v.channel_id == interaction.channel_id]
+                    for policy_id in policies_to_remove:
+                        del active_trackers[policy_id]
+                    for child in self.children:
+                        child.disabled = True
+                    embed = discord.Embed(
+                        title="✅ Tracking Stopped",
+                        description="All tracking stopped in this channel.",
+                        color=discord.Color.green()
+                    )
+                    await interaction.response.edit_message(embed=embed, view=self)
+                except Exception as e:
+                    logger.error(f"Error stopping tracking: {str(e)}", exc_info=True)
+                    await interaction.response.send_message("Failed to stop tracking.", ephemeral=True)
 
-    await interaction.response.send_message(embed=embed, view=ConfirmView())
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                for child in self.children:
+                    child.disabled = True
+                embed = discord.Embed(
+                    title="❌ Cancelled",
+                    description="Token tracking will continue.",
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=self)
+
+        await interaction.response.send_message(embed=embed, view=ConfirmView())
+    except Exception as e:
+        logger.error(f"Error in stop command: {str(e)}", exc_info=True)
+        await interaction.response.send_message("Failed to process stop command.", ephemeral=True)
 
 def run_webhook_server():
+    """Run the FastAPI webhook server"""
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
 
 if __name__ == "__main__":
