@@ -677,18 +677,18 @@ def analyze_transaction_improved(tx_details, policy_id):
             'decimals': decimals,
             'full_asset_name': full_asset_name
         }
-
-        if token_in > 0 and token_out > 0:
-            return 'wallet_transfer', ada_amount, token_amount, details
-        elif token_in > 0 and token_out == 0:
-            return 'sell', ada_amount, token_amount, details
-        elif token_in == 0 and token_out > 0:
-            return 'buy', ada_amount, token_amount, details
-        else:
-            return 'unknown', 0, 0, details
+        
+        if ada_delta > 1.0:  # More than 1 ADA change indicates a trade
+            if token_out > token_in:
+                return 'buy', ada_delta, token_amount, details
+            else:
+                return 'sell', ada_delta, token_amount, details
+        elif token_in > 0 and token_out > 0:
+            return 'wallet_transfer', ada_delta, token_amount, details
     except Exception as e:
         logger.error(f"Error analyzing transaction: {str(e)}", exc_info=True)
         return 'unknown', 0, 0, {}
+            
 
 async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tracker, analysis_details):
     """Creates a detailed embed for DEX trades"""
