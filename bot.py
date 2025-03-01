@@ -237,6 +237,7 @@ class Database:
 # Create database instance
 database = Database()
 
+
 # Initialize FastAPI app for webhook handling
 app = FastAPI()
 notification_queue = Queue()
@@ -333,50 +334,52 @@ def verify_webhook_signature(payload: bytes, header: str, current_time: int) -> 
 async def transaction_webhook(request: Request):
     """Handle incoming transaction webhooks from Blockfrost"""
     try:
-        logger.info("Received webhook request")
+        logger.info("=== Webhook Request Received ===")
         signature = request.headers.get('Blockfrost-Signature')
         if not signature:
-            logger.error("Missing Blockfrost-Signature header")
+            logger.error("❌ Missing Blockfrost-Signature header")
             raise HTTPException(status_code=400, detail="Missing signature header")
         
         payload = await request.body()
-        logger.debug(f"Raw payload size: {len(payload)} bytes")
+        logger.info(f"📦 Raw payload size: {len(payload)} bytes")
         
         current_time = int(time.time())
         if not verify_webhook_signature(payload, signature, current_time):
-            logger.error("Invalid webhook signature")
+            logger.error("❌ Invalid webhook signature")
             raise HTTPException(status_code=401, detail="Invalid signature")
         
         data = await request.json()
         tx_count = len(data.get('payload', []))
-        logger.info(f"Webhook contains {tx_count} transaction(s)")
+        logger.info(f"📥 Webhook contains {tx_count} transaction(s)")
         
         if not isinstance(data, dict) or 'type' not in data or data['type'] != 'transaction':
-            logger.error(f"Invalid webhook data format: {data.get('type', 'unknown type')}")
+            logger.error(f"❌ Invalid webhook data format: {data.get('type', 'unknown type')}")
             return {"status": "ignored"}
         
         transactions = data.get('payload', [])
         if not transactions:
-            logger.info("Webhook contains no transactions")
+            logger.info("ℹ️ Webhook contains no transactions")
             return {"status": "no transactions"}
         
         for tx_data in transactions:
             tx = tx_data.get('tx', {})
             tx_hash = tx.get('hash', 'unknown')
-            logger.info(f"Processing transaction: {tx_hash}")
+            logger.info(f"🔍 Processing transaction: {tx_hash}")
             
             inputs = tx_data.get('inputs', [])
             outputs = tx_data.get('outputs', [])
             if not tx or not inputs or not outputs:
-                logger.warning(f"Skipping transaction {tx_hash} - Missing required data")
+                logger.warning(f"⚠️ Skipping transaction {tx_hash} - Missing required data")
                 continue
             
             trackers = database.get_trackers()
-            logger.info(f"Checking transaction against {len(trackers)} tracked tokens")
+            logger.info(f"📋 Checking transaction against {len(trackers)} tracked tokens")
             
             for tracker in trackers:
+                logger.info(f"🔍 Checking tracker: {tracker.token_name} ({tracker.policy_id})")
                 tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
                 if tracker_key not in active_trackers:
+                    logger.info(f"📝 Creating new tracker instance for {tracker.token_name}")
                     active_trackers[tracker_key] = TokenTrackerClass(
                         policy_id=tracker.policy_id,
                         channel_id=int(tracker.channel_id),
@@ -391,49 +394,17 @@ async def transaction_webhook(request: Request):
                     )
                 active_tracker = active_trackers[tracker_key]
                 
-                is_involved = False
-                input_addresses = []
-                for inp in inputs:
-                    input_addresses.append(inp.get('address', ''))
-                    for amt in inp.get('amount', []):
-                        unit = amt.get('unit', '')
-                        if unit == 'lovelace':
-                            continue
-                        logger.info(f"Checking input unit: {unit} against policy: {tracker.policy_id}")
-                        if len(unit) >= 56 and unit[:56].lower() == tracker.policy_id.lower():
-                            is_involved = True
-                            logger.info(f"Found token {active_tracker.token_name} in transaction inputs")
-                            break
-                    if is_involved:
-                        break
+                logger.info(f"🔍 Analyzing transaction for {active_tracker.token_name}")
+                analysis_data = {
+                    'inputs': inputs,
+                    'outputs': outputs,
+                    'tx': tx
+                }
+                tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, active_tracker.policy_id)
+                details['hash'] = tx_hash
+                logger.info(f"📊 Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
                 
-                if not is_involved:
-                    output_addresses = []
-                    for out in outputs:
-                        output_addresses.append(out.get('address', ''))
-                        for amt in out.get('amount', []):
-                            unit = amt.get('unit', '')
-                            if unit == 'lovelace':
-                                continue
-                            logger.info(f"Checking output unit: {unit} against policy: {tracker.policy_id}")
-                            if len(unit) >= 56 and unit[:56].lower() == tracker.policy_id.lower():
-                                is_involved = True
-                                logger.info(f"Found token {active_tracker.token_name} in transaction outputs")
-                                break
-                        if is_involved:
-                            break
-                
-                if is_involved:
-                    logger.info(f"Analyzing transaction for {active_tracker.token_name} ({active_tracker.policy_id})")
-                    analysis_data = {
-                        'inputs': inputs,
-                        'outputs': outputs,
-                        'tx': tx
-                    }
-                    tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, active_tracker.policy_id)
-                    details['hash'] = tx_hash
-                    logger.info(f"Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
-                    
+                if tx_type:  # Only queue if we found a relevant transaction
                     notification_data = {
                         'tx_details': analysis_data,
                         'policy_id': active_tracker.policy_id,
@@ -447,11 +418,14 @@ async def transaction_webhook(request: Request):
                         'tracker': active_tracker
                     }
                     notification_queue.put(notification_data)
-                    logger.debug(f"Queued notification: {json.dumps(notification_data, default=str)[:1000]}...")
+                    logger.info(f"✅ Queued notification for {active_tracker.token_name}")
+                else:
+                    logger.info(f"ℹ️ No relevant transaction found for {active_tracker.token_name}")
         
+        logger.info("=== Webhook Processing Complete ===")
         return {"status": "success", "message": "Notification queued"}
     except Exception as e:
-        logger.error(f"Error in webhook: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error in webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @tasks.loop(seconds=1)
@@ -459,6 +433,7 @@ async def process_notification_queue():
     """Process any pending notifications in the queue"""
     try:
         while not notification_queue.empty():
+            logger.info("=== Processing Notification from Queue ===")
             data = notification_queue.get_nowait()
             try:
                 tx_details = data['tx_details']
@@ -467,6 +442,12 @@ async def process_notification_queue():
                 token_amount = data['token_amount']
                 analysis_details = data['analysis_details']
                 
+                logger.info(f"📦 Queue Data:")
+                logger.info(f"- Token: {tracker.token_name}")
+                logger.info(f"- Type: {analysis_details['type']}")
+                logger.info(f"- Amount: {token_amount:,.2f}")
+                logger.info(f"- ADA: {ada_amount:,.2f}")
+                
                 await send_transaction_notification(
                     tracker=tracker,
                     tx_type=analysis_details['type'],
@@ -474,12 +455,13 @@ async def process_notification_queue():
                     token_amount=token_amount,
                     details=analysis_details
                 )
+                logger.info("✅ Successfully processed notification")
                 notification_queue.task_done()
             except Exception as e:
-                logger.error(f"Error processing notification: {str(e)}", exc_info=True)
+                logger.error(f"❌ Error processing notification: {str(e)}", exc_info=True)
                 notification_queue.task_done()
     except Exception as e:
-        logger.error(f"Error in notification queue loop: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error in notification queue loop: {str(e)}", exc_info=True)
 
 @bot.event
 async def on_ready():
@@ -812,63 +794,79 @@ def shorten_address(address):
 async def send_transaction_notification(tracker, tx_type, ada_amount, token_amount, details):
     """Send a notification about a transaction to the appropriate Discord channel"""
     try:
+        logger.info(f"=== Starting Notification Process ===")
+        logger.info(f"Token: {tracker.token_name} ({tracker.policy_id})")
+        logger.info(f"Type: {tx_type}, Amount: {token_amount:,.2f}, ADA: {ada_amount:,.2f}")
+        logger.info(f"Channel ID: {tracker.channel_id}")
+        
         if tx_type == 'wallet_transfer' and not tracker.track_transfers:
-            logger.info("Transfer tracking disabled, skipping notification")
+            logger.info("❌ Transfer tracking disabled, skipping notification")
             return
 
         decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
         human_readable_amount = token_amount
+        logger.info(f"Threshold Check - Amount: {human_readable_amount:,.{decimals}f}, Required: {tracker.threshold:,.{decimals}f}")
         if human_readable_amount < tracker.threshold:
-            logger.info(f"Token amount {human_readable_amount:,.{decimals}f} below threshold {tracker.threshold}")
+            logger.info(f"❌ Amount below threshold, skipping notification")
             return
         
+        logger.info(f"🔍 Fetching channel {tracker.channel_id}")
         channel = bot.get_channel(tracker.channel_id)
         if not channel:
-            logger.warning(f"Channel {tracker.channel_id} not in cache, attempting to fetch")
+            logger.warning(f"Channel not in cache, attempting to fetch")
             try:
                 channel = await bot.fetch_channel(tracker.channel_id)
+                logger.info(f"✅ Successfully fetched channel {channel.name} ({channel.id})")
             except discord.NotFound:
-                logger.error(f"Channel {tracker.channel_id} not found")
+                logger.error(f"❌ Channel {tracker.channel_id} not found")
                 tracker_key = f"{tracker.policy_id}:{tracker.channel_id}"
                 if tracker_key in active_trackers:
                     del active_trackers[tracker_key]
                 database.delete_token_tracker(tracker.policy_id, tracker.channel_id)
                 return
             except discord.Forbidden:
-                logger.error(f"Bot does not have permission to access channel {tracker.channel_id}")
+                logger.error(f"❌ No permission to access channel {tracker.channel_id}")
                 return
             except Exception as e:
-                logger.error(f"Error fetching channel {tracker.channel_id}: {str(e)}", exc_info=True)
+                logger.error(f"❌ Error fetching channel: {str(e)}", exc_info=True)
                 return
         
         if not channel:
-            logger.error(f"Failed to resolve channel {tracker.channel_id}")
+            logger.error(f"❌ Failed to resolve channel {tracker.channel_id}")
             return
         
+        logger.info(f"📝 Creating notification for channel {channel.name}")
         if tx_type in ['buy', 'sell']:
             embed = await create_trade_embed(details, tracker.policy_id, ada_amount, token_amount, tracker, details)
             if embed:
                 try:
+                    logger.info(f"📨 Sending trade notification")
                     await channel.send(embed=embed)
                     tracker.increment_trade_notifications()
-                    logger.info(f"Sent trade notification to channel {tracker.channel_id}")
+                    logger.info(f"✅ Successfully sent trade notification")
                 except discord.Forbidden:
-                    logger.error(f"No permission to send messages in channel {tracker.channel_id}")
+                    logger.error(f"❌ No permission to send messages in channel {channel.name}")
                 except Exception as e:
-                    logger.error(f"Error sending trade notification: {str(e)}")
+                    logger.error(f"❌ Error sending trade notification: {str(e)}", exc_info=True)
+            else:
+                logger.error("❌ Failed to create trade embed")
         elif tx_type == 'wallet_transfer' and tracker.track_transfers:
             embed = await create_transfer_embed(details, tracker.policy_id, token_amount, tracker)
             if embed:
                 try:
+                    logger.info(f"📨 Sending transfer notification")
                     await channel.send(embed=embed)
                     tracker.increment_transfer_notifications()
-                    logger.info(f"Sent transfer notification to channel {tracker.channel_id}")
+                    logger.info(f"✅ Successfully sent transfer notification")
                 except discord.Forbidden:
-                    logger.error(f"No permission to send messages in channel {tracker.channel_id}")
+                    logger.error(f"❌ No permission to send messages in channel {channel.name}")
                 except Exception as e:
-                    logger.error(f"Error sending transfer notification: {str(e)}")
+                    logger.error(f"❌ Error sending transfer notification: {str(e)}", exc_info=True)
+            else:
+                logger.error("❌ Failed to create transfer embed")
+        logger.info(f"=== Notification Process Complete ===")
     except Exception as e:
-        logger.error(f"Error sending transaction notification: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error in notification process: {str(e)}", exc_info=True)
 
 class TokenControls(discord.ui.View):
     def __init__(self, policy_id):
