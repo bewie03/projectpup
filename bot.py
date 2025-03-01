@@ -646,6 +646,7 @@ def analyze_transaction_improved(tx_details, policy_id):
 
         ada_in = ada_in / 1_000_000
         ada_out = ada_out / 1_000_000
+        ada_delta = abs(ada_out - ada_in)
 
         ada_amount = abs(ada_out - ada_in)
         if token_in > 0 and token_out > 0:
