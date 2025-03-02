@@ -37,7 +37,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.addHandler(console_handler)
 
-# SQLAlchemy Database Setup (matching your provided structure)
+# SQLAlchemy Database Setup (matching your provided structure exactly)
 Base = declarative_base()
 
 class TokenTracker(Base):
@@ -82,13 +82,39 @@ class Database:
         self.Session = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
 
     def get_trackers(self):
-        """Retrieve all token trackers, ensuring channel_id is an integer"""
+        """Retrieve all token trackers, ensuring channel_id is an integer and ignoring decimals"""
         with self.Session() as session:
             try:
-                trackers = session.query(TokenTracker).all()
+                # Explicitly list only the columns that exist in the database
+                trackers = session.query(TokenTracker).with_entities(
+                    TokenTracker.policy_id,
+                    TokenTracker.channel_id,
+                    TokenTracker.token_name,
+                    TokenTracker.image_url,
+                    TokenTracker.threshold,
+                    TokenTracker.track_transfers,
+                    TokenTracker.last_block,
+                    TokenTracker.trade_notifications,
+                    TokenTracker.transfer_notifications,
+                    TokenTracker.token_info
+                ).all()
+                result = []
                 for tracker in trackers:
-                    tracker.channel_id = int(tracker.channel_id)
-                return trackers
+                    # Convert tuple to TokenTracker instance manually
+                    tracker_obj = TokenTracker(
+                        policy_id=tracker[0],
+                        channel_id=int(tracker[1]),
+                        token_name=tracker[2],
+                        image_url=tracker[3],
+                        threshold=tracker[4],
+                        track_transfers=tracker[5],
+                        last_block=tracker[6],
+                        trade_notifications=tracker[7],
+                        transfer_notifications=tracker[8],
+                        token_info=tracker[9]
+                    )
+                    result.append(tracker_obj)
+                return result
             except SQLAlchemyError as e:
                 logger.error(f"Failed to retrieve trackers: {str(e)}", exc_info=True)
                 return []
@@ -97,13 +123,36 @@ class Database:
         """Fetch a specific token tracker by policy_id and channel_id"""
         with self.Session() as session:
             try:
+                # Explicitly query only existing columns
                 tracker = session.query(TokenTracker).filter_by(
                     policy_id=policy_id,
                     channel_id=channel_id
+                ).with_entities(
+                    TokenTracker.policy_id,
+                    TokenTracker.channel_id,
+                    TokenTracker.token_name,
+                    TokenTracker.image_url,
+                    TokenTracker.threshold,
+                    TokenTracker.track_transfers,
+                    TokenTracker.last_block,
+                    TokenTracker.trade_notifications,
+                    TokenTracker.transfer_notifications,
+                    TokenTracker.token_info
                 ).first()
                 if tracker:
-                    tracker.channel_id = int(tracker.channel_id)
-                return tracker
+                    return TokenTracker(
+                        policy_id=tracker[0],
+                        channel_id=int(tracker[1]),
+                        token_name=tracker[2],
+                        image_url=tracker[3],
+                        threshold=tracker[4],
+                        track_transfers=tracker[5],
+                        last_block=tracker[6],
+                        trade_notifications=tracker[7],
+                        transfer_notifications=tracker[8],
+                        token_info=tracker[9]
+                    )
+                return None
             except SQLAlchemyError as e:
                 logger.error(f"Failed to retrieve tracker for {policy_id}/{channel_id}: {str(e)}", exc_info=True)
                 return None
@@ -255,10 +304,35 @@ class Database:
         """Retrieve all token trackers with integer channel_ids"""
         with self.Session() as session:
             try:
-                trackers = session.query(TokenTracker).all()
+                # Explicitly list only existing columns
+                trackers = session.query(TokenTracker).with_entities(
+                    TokenTracker.policy_id,
+                    TokenTracker.channel_id,
+                    TokenTracker.token_name,
+                    TokenTracker.image_url,
+                    TokenTracker.threshold,
+                    TokenTracker.track_transfers,
+                    TokenTracker.last_block,
+                    TokenTracker.trade_notifications,
+                    TokenTracker.transfer_notifications,
+                    TokenTracker.token_info
+                ).all()
+                result = []
                 for tracker in trackers:
-                    tracker.channel_id = int(tracker.channel_id)
-                return trackers
+                    tracker_obj = TokenTracker(
+                        policy_id=tracker[0],
+                        channel_id=int(tracker[1]),
+                        token_name=tracker[2],
+                        image_url=tracker[3],
+                        threshold=tracker[4],
+                        track_transfers=tracker[5],
+                        last_block=tracker[6],
+                        trade_notifications=tracker[7],
+                        transfer_notifications=tracker[8],
+                        token_info=tracker[9]
+                    )
+                    result.append(tracker_obj)
+                return result
             except SQLAlchemyError as e:
                 logger.error(f"Failed to retrieve all trackers: {str(e)}", exc_info=True)
                 return []
@@ -309,7 +383,7 @@ class TokenTrackerClass:
         self.threshold = threshold
         self.track_transfers = track_transfers
         self.token_info = token_info or {}
-        self.decimals = self.token_info.get('decimals', 0) if token_info and 'decimals' in token_info else 0
+        self.decimals = self.token_info.get('decimals', 0) if self.token_info and 'decimals' in self.token_info else 0
         self.trade_notifications = 0
         self.transfer_notifications = 0
 
@@ -474,7 +548,7 @@ def format_token_amount(amount: int, token_info: dict) -> str:
     return f"{amount_float:,.{min(decimals, 6)}f}"
 
 def analyze_transaction(tx_data, tracker) -> tuple | None:
-    """Analyze Cardano transaction to determine type (transfer, buy, sell) and amounts"""
+    """Analyze Cardano transaction to determine type (transfer, buy, sell) and amounts with precise decimal handling"""
     try:
         inputs = tx_data.get('inputs', [])
         outputs = tx_data.get('outputs', [])
@@ -505,7 +579,15 @@ def analyze_transaction(tx_data, tracker) -> tuple | None:
 
         ada_amount = (ada_out - ada_in) / 1_000_000  # Convert lovelace to ADA
         raw_token_amount = token_out - token_in
-        token_amount = raw_token_amount / (10 ** decimals) if decimals > 0 else raw_token_amount
+
+        # Calculate token amount with decimals
+        if decimals > 0:
+            token_amount = raw_token_amount / (10 ** decimals)
+        else:
+            token_amount = raw_token_amount
+
+        # Log raw and calculated amounts for debugging
+        logger.debug(f"Transaction {tx_hash}: Raw token amount = {raw_token_amount}, Decimals = {decimals}, Calculated = {token_amount}")
 
         # Determine transaction type with precise logic
         if abs(ada_amount) > 1.0:  # Likely a DEX trade
@@ -527,7 +609,7 @@ def analyze_transaction(tx_data, tracker) -> tuple | None:
                 'inputs': [inp for inp in inputs if inp.get('address')],
                 'outputs': [out for out in outputs if out.get('address')]
             }
-        logger.debug(f"No significant transaction detected for {tracker.token_name}")
+        logger.debug(f"No significant transaction detected for {tracker.token_name} - token_amount: {token_amount}")
         return None
     except Exception as e:
         logger.error(f"Transaction analysis failed: {str(e)}", exc_info=True)
