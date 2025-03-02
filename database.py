@@ -99,7 +99,7 @@ class Database:
         """Add a new token tracker or update if exists"""
         session = self.Session()
         try:
-            # Check if tracker exists
+            # Check if tracker exists with both policy_id and channel_id
             tracker = session.query(TokenTracker).filter_by(
                 policy_id=policy_id,
                 channel_id=channel_id
@@ -112,8 +112,13 @@ class Database:
                 tracker.threshold = threshold
                 tracker.token_info = token_info
                 tracker.track_transfers = track_transfers
-                logger.info(f"Updated existing tracker for {token_name}")
+                logger.info(f"Updated existing tracker for {token_name} in channel {channel_id}")
             else:
+                # Before creating new, check if this token is tracked in other channels
+                existing_trackers = session.query(TokenTracker).filter_by(
+                    policy_id=policy_id
+                ).all()
+                
                 # Create new tracker
                 tracker = TokenTracker(
                     policy_id=policy_id,
@@ -122,10 +127,11 @@ class Database:
                     image_url=image_url,
                     threshold=threshold,
                     token_info=token_info,
-                    track_transfers=track_transfers
+                    track_transfers=track_transfers,
+                    last_block=max([t.last_block for t in existing_trackers]) if existing_trackers else 0
                 )
                 session.add(tracker)
-                logger.info(f"Created new tracker for {token_name}")
+                logger.info(f"Created new tracker for {token_name} in channel {channel_id}")
                 
             session.commit()
             return tracker
