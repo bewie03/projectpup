@@ -16,7 +16,6 @@ import hmac
 import hashlib
 import uvicorn
 import threading
-import time
 from queue import Queue
 from sqlalchemy import create_engine, Column, Integer, String, Float, BigInteger, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
@@ -37,7 +36,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.addHandler(console_handler)
 
-# SQLAlchemy Database Setup (matching your provided structure exactly)
+# SQLAlchemy Database Setup
 Base = declarative_base()
 
 class TokenTracker(Base):
@@ -82,39 +81,13 @@ class Database:
         self.Session = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
 
     def get_trackers(self):
-        """Retrieve all token trackers, ensuring channel_id is an integer and ignoring decimals"""
+        """Retrieve all token trackers, ensuring channel_id is an integer"""
         with self.Session() as session:
             try:
-                # Explicitly list only the columns that exist in the database
-                trackers = session.query(TokenTracker).with_entities(
-                    TokenTracker.policy_id,
-                    TokenTracker.channel_id,
-                    TokenTracker.token_name,
-                    TokenTracker.image_url,
-                    TokenTracker.threshold,
-                    TokenTracker.track_transfers,
-                    TokenTracker.last_block,
-                    TokenTracker.trade_notifications,
-                    TokenTracker.transfer_notifications,
-                    TokenTracker.token_info
-                ).all()
-                result = []
+                trackers = session.query(TokenTracker).all()
                 for tracker in trackers:
-                    # Convert tuple to TokenTracker instance manually
-                    tracker_obj = TokenTracker(
-                        policy_id=tracker[0],
-                        channel_id=int(tracker[1]),
-                        token_name=tracker[2],
-                        image_url=tracker[3],
-                        threshold=tracker[4],
-                        track_transfers=tracker[5],
-                        last_block=tracker[6],
-                        trade_notifications=tracker[7],
-                        transfer_notifications=tracker[8],
-                        token_info=tracker[9]
-                    )
-                    result.append(tracker_obj)
-                return result
+                    tracker.channel_id = int(tracker.channel_id)
+                return trackers
             except SQLAlchemyError as e:
                 logger.error(f"Failed to retrieve trackers: {str(e)}", exc_info=True)
                 return []
@@ -123,36 +96,13 @@ class Database:
         """Fetch a specific token tracker by policy_id and channel_id"""
         with self.Session() as session:
             try:
-                # Explicitly query only existing columns
                 tracker = session.query(TokenTracker).filter_by(
                     policy_id=policy_id,
                     channel_id=channel_id
-                ).with_entities(
-                    TokenTracker.policy_id,
-                    TokenTracker.channel_id,
-                    TokenTracker.token_name,
-                    TokenTracker.image_url,
-                    TokenTracker.threshold,
-                    TokenTracker.track_transfers,
-                    TokenTracker.last_block,
-                    TokenTracker.trade_notifications,
-                    TokenTracker.transfer_notifications,
-                    TokenTracker.token_info
                 ).first()
                 if tracker:
-                    return TokenTracker(
-                        policy_id=tracker[0],
-                        channel_id=int(tracker[1]),
-                        token_name=tracker[2],
-                        image_url=tracker[3],
-                        threshold=tracker[4],
-                        track_transfers=tracker[5],
-                        last_block=tracker[6],
-                        trade_notifications=tracker[7],
-                        transfer_notifications=tracker[8],
-                        token_info=tracker[9]
-                    )
-                return None
+                    tracker.channel_id = int(tracker.channel_id)
+                return tracker
             except SQLAlchemyError as e:
                 logger.error(f"Failed to retrieve tracker for {policy_id}/{channel_id}: {str(e)}", exc_info=True)
                 return None
@@ -304,35 +254,10 @@ class Database:
         """Retrieve all token trackers with integer channel_ids"""
         with self.Session() as session:
             try:
-                # Explicitly list only existing columns
-                trackers = session.query(TokenTracker).with_entities(
-                    TokenTracker.policy_id,
-                    TokenTracker.channel_id,
-                    TokenTracker.token_name,
-                    TokenTracker.image_url,
-                    TokenTracker.threshold,
-                    TokenTracker.track_transfers,
-                    TokenTracker.last_block,
-                    TokenTracker.trade_notifications,
-                    TokenTracker.transfer_notifications,
-                    TokenTracker.token_info
-                ).all()
-                result = []
+                trackers = session.query(TokenTracker).all()
                 for tracker in trackers:
-                    tracker_obj = TokenTracker(
-                        policy_id=tracker[0],
-                        channel_id=int(tracker[1]),
-                        token_name=tracker[2],
-                        image_url=tracker[3],
-                        threshold=tracker[4],
-                        track_transfers=tracker[5],
-                        last_block=tracker[6],
-                        trade_notifications=tracker[7],
-                        transfer_notifications=tracker[8],
-                        token_info=tracker[9]
-                    )
-                    result.append(tracker_obj)
-                return result
+                    tracker.channel_id = int(tracker.channel_id)
+                return trackers
             except SQLAlchemyError as e:
                 logger.error(f"Failed to retrieve all trackers: {str(e)}", exc_info=True)
                 return []
@@ -539,13 +464,13 @@ def get_token_info(policy_id: str) -> dict:
         logger.error(f"Unexpected error fetching token info: {str(e)}", exc_info=True)
         return {}
 
-def format_token_amount(amount: int, token_info: dict) -> str:
+def format_token_amount(raw_amount: int, token_info: dict) -> str:
     """Format token amount with precise decimal handling for Cardano tokens"""
     decimals = token_info.get('decimals', 0) if token_info else 0
     if decimals <= 0:
-        return f"{amount:,}"
-    amount_float = amount / (10 ** decimals)
-    return f"{amount_float:,.{min(decimals, 6)}f}"
+        return f"{raw_amount:,}"
+    adjusted_amount = raw_amount / (10 ** decimals)
+    return f"{adjusted_amount:,.{min(decimals, 6)}f}"
 
 def analyze_transaction(tx_data, tracker) -> tuple | None:
     """Analyze Cardano transaction to determine type (transfer, buy, sell) and amounts with precise decimal handling"""
@@ -555,64 +480,52 @@ def analyze_transaction(tx_data, tracker) -> tuple | None:
         tx = tx_data.get('tx', {})
         tx_hash = tx.get('hash', 'unknown')
 
-        ada_in, ada_out = 0, 0
-        token_in, token_out = 0, 0
-        policy_id = tracker.policy_id
-        token_name = tracker.token_name or ''
-        full_asset = f"{policy_id}{token_name}" if token_name else policy_id
+        # Calculate ADA and token movements (in raw units)
+        ada_in = sum(int(amt['quantity']) for inp in inputs for amt in inp.get('amount', []) if amt['unit'] == 'lovelace')
+        ada_out = sum(int(amt['quantity']) for out in outputs for amt in out.get('amount', []) if amt['unit'] == 'lovelace')
+        token_sent = sum(int(amt['quantity']) for inp in inputs for amt in inp.get('amount', []) if amt['unit'].startswith(tracker.policy_id))
+        token_received = sum(int(amt['quantity']) for out in outputs for amt in out.get('amount', []) if amt['unit'].startswith(tracker.policy_id))
+
+        ada_movement = (ada_out - ada_in) / 1_000_000  # Convert lovelace to ADA
         decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
 
-        # Calculate ADA and token movements
-        for inp in inputs:
-            for amt in inp.get('amount', []):
-                if amt['unit'] == 'lovelace':
-                    ada_in += int(amt['quantity'])
-                elif amt['unit'].startswith(policy_id):
-                    token_in += int(amt['quantity'])
+        # Adjust token amounts for decimals
+        token_sent_adjusted = token_sent / (10 ** decimals) if decimals > 0 else token_sent
+        token_received_adjusted = token_received / (10 ** decimals) if decimals > 0 else token_received
 
-        for out in outputs:
-            for amt in out.get('amount', []):
-                if amt['unit'] == 'lovelace':
-                    ada_out += int(amt['quantity'])
-                elif amt['unit'].startswith(policy_id):
-                    token_out += int(amt['quantity'])
+        # Log for debugging
+        logger.debug(f"Tx {tx_hash}: token_sent={token_sent}, token_received={token_received}, ada_movement={ada_movement}")
 
-        ada_amount = (ada_out - ada_in) / 1_000_000  # Convert lovelace to ADA
-        raw_token_amount = token_out - token_in
-
-        # Calculate token amount with decimals
-        if decimals > 0:
-            token_amount = raw_token_amount / (10 ** decimals)
-        else:
-            token_amount = raw_token_amount
-
-        # Log raw and calculated amounts for debugging
-        logger.debug(f"Transaction {tx_hash}: Raw token amount = {raw_token_amount}, Decimals = {decimals}, Calculated = {token_amount}")
-
-        # Determine transaction type with precise logic
-        if abs(ada_amount) > 1.0:  # Likely a DEX trade
-            if ada_amount < 0:  # ADA spent, tokens received (purchase)
-                return 'buy', abs(ada_amount), token_amount, {
+        # Determine transaction type and amounts
+        if abs(ada_movement) > 1.0:  # Likely a DEX trade (significant ADA movement)
+            if ada_movement < 0 and token_received > 0:  # ADA spent, tokens received = Buy
+                token_amount = token_received_adjusted
+                ada_amount = abs(ada_movement)  # ADA spent
+                return 'buy', ada_amount, token_amount, {
                     'hash': tx_hash,
                     'inputs': [inp for inp in inputs if inp.get('address')],
                     'outputs': [out for out in outputs if out.get('address')]
                 }
-            else:  # Tokens spent, ADA received (sale)
-                return 'sell', ada_amount, abs(token_amount), {
+            elif ada_movement > 0 and token_sent > 0:  # ADA received, tokens sent = Sell
+                token_amount = token_sent_adjusted
+                ada_amount = ada_movement  # ADA received
+                return 'sell', ada_amount, token_amount, {
                     'hash': tx_hash,
                     'inputs': [inp for inp in inputs if inp.get('address')],
                     'outputs': [out for out in outputs if out.get('address')]
                 }
-        elif token_in > 0 and token_out > 0:  # Token transfer between wallets
-            return 'transfer', 0, abs(token_amount), {
+        elif token_sent > 0 or token_received > 0:  # Token transfer between wallets (minimal ADA)
+            token_amount = max(token_sent_adjusted, token_received_adjusted)  # Use the larger movement
+            return 'transfer', 0, token_amount, {
                 'hash': tx_hash,
                 'inputs': [inp for inp in inputs if inp.get('address')],
                 'outputs': [out for out in outputs if out.get('address')]
             }
-        logger.debug(f"No significant transaction detected for {tracker.token_name} - token_amount: {token_amount}")
+
+        logger.debug(f"No significant transaction detected for {tracker.token_name}")
         return None
     except Exception as e:
-        logger.error(f"Transaction analysis failed: {str(e)}", exc_info=True)
+        logger.error(f"Transaction analysis failed for {tx_hash}: {str(e)}", exc_info=True)
         return None
 
 async def create_transfer_embed(tracker, token_amount, details):
@@ -635,7 +548,7 @@ async def create_transfer_embed(tracker, token_amount, details):
         name="Transfer Details",
         value=f"**From:** [{sender[:8]}...](https://cardanoscan.io/address/{sender})\n"
               f"**To:** [{receiver[:8]}...](https://cardanoscan.io/address/{receiver})\n"
-              f"**Amount:** {format_token_amount(int(abs(token_amount) * (10 ** tracker.token_info.get('decimals', 0))), tracker.token_info)} {tracker.token_name}",
+              f"**Amount:** {format_token_amount(int(token_amount * (10 ** tracker.token_info.get('decimals', 0))) if tracker.token_info.get('decimals', 0) > 0 else int(token_amount), tracker.token_info)} {tracker.token_name}",
         inline=False
     )
     if tracker.image_url:
@@ -647,7 +560,7 @@ async def create_trade_embed(tracker, tx_type, ada_amount, token_amount, details
     """Create a polished embed for DEX trade notifications (buy/sell)"""
     tx_hash = details['hash']
     title = f"💰 {tracker.token_name} {'Purchase' if tx_type == 'buy' else 'Sale'} Detected"
-    color = discord.Color.green() if tx_type == 'buy' else discord.Color.blue()
+    color = discord.Color.green() if tx_type == 'buy' else discord.Color.red()
 
     embed = discord.Embed(
         title=title,
@@ -662,9 +575,8 @@ async def create_trade_embed(tracker, tx_type, ada_amount, token_amount, details
     )
     embed.add_field(
         name="Trade Details",
-        value=f"{'ADA Spent' if tx_type == 'buy' else 'ADA Received'}: {abs(ada_amount):,.2f} ADA\n"
-              f"{'Tokens Received' if tx_type == 'buy' else 'Tokens Sold'}: {format_token_amount(int(abs(token_amount) * (10 ** tracker.token_info.get('decimals', 0))), tracker.token_info)} {tracker.token_name}\n"
-              f"Price/Token: {abs(ada_amount/token_amount):,.6f} ADA",
+        value=f"{'Tokens Bought' if tx_type == 'buy' else 'Tokens Sold'}: {format_token_amount(int(token_amount * (10 ** tracker.token_info.get('decimals', 0))) if tracker.token_info.get('decimals', 0) > 0 else int(token_amount), tracker.token_info)} {tracker.token_name}\n"
+              f"{'ADA Spent' if tx_type == 'buy' else 'ADA Received'}: {ada_amount:,.2f} ADA",
         inline=True
     )
 
@@ -687,10 +599,13 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
     if tx_type == 'transfer' and not tracker.track_transfers:
         logger.info(f"Skipping transfer notification for {tracker.token_name} - tracking disabled")
         return
+
+    # Use raw token amount for threshold check (adjusted based on decimals)
     decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
-    formatted_amount = abs(token_amount) * (10 ** decimals) if decimals > 0 else abs(token_amount)
-    if formatted_amount < tracker.threshold:
-        logger.info(f"Skipping notification for {tracker.token_name} - amount {formatted_amount} below threshold {tracker.threshold}")
+    raw_token_amount = int(token_amount * (10 ** decimals)) if decimals > 0 else int(token_amount)
+
+    if raw_token_amount < tracker.threshold:
+        logger.info(f"Skipping notification for {tracker.token_name} - raw amount {raw_token_amount} below threshold {tracker.threshold}")
         return
 
     channel = bot.get_channel(tracker.channel_id)
