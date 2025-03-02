@@ -37,7 +37,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.addHandler(console_handler)
 
-# SQLAlchemy Database Setup (using your provided structure)
+# SQLAlchemy Database Setup (matching your provided structure)
 Base = declarative_base()
 
 class TokenTracker(Base):
@@ -309,7 +309,7 @@ class TokenTrackerClass:
         self.threshold = threshold
         self.track_transfers = track_transfers
         self.token_info = token_info or {}
-        self.decimals = self.token_info.get('decimals', 0) if token_info else 0
+        self.decimals = self.token_info.get('decimals', 0) if token_info and 'decimals' in token_info else 0
         self.trade_notifications = 0
         self.transfer_notifications = 0
 
@@ -465,8 +465,9 @@ def get_token_info(policy_id: str) -> dict:
         logger.error(f"Unexpected error fetching token info: {str(e)}", exc_info=True)
         return {}
 
-def format_token_amount(amount: int, decimals: int) -> str:
+def format_token_amount(amount: int, token_info: dict) -> str:
     """Format token amount with precise decimal handling for Cardano tokens"""
+    decimals = token_info.get('decimals', 0) if token_info else 0
     if decimals <= 0:
         return f"{amount:,}"
     amount_float = amount / (10 ** decimals)
@@ -485,7 +486,7 @@ def analyze_transaction(tx_data, tracker) -> tuple | None:
         policy_id = tracker.policy_id
         token_name = tracker.token_name or ''
         full_asset = f"{policy_id}{token_name}" if token_name else policy_id
-        decimals = tracker.token_info.get('decimals', 0)
+        decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
 
         # Calculate ADA and token movements
         for inp in inputs:
@@ -552,7 +553,7 @@ async def create_transfer_embed(tracker, token_amount, details):
         name="Transfer Details",
         value=f"**From:** [{sender[:8]}...](https://cardanoscan.io/address/{sender})\n"
               f"**To:** [{receiver[:8]}...](https://cardanoscan.io/address/{receiver})\n"
-              f"**Amount:** {format_token_amount(int(abs(token_amount) * (10 ** tracker.token_info.get('decimals', 0))), tracker.token_info.get('decimals', 0))} {tracker.token_name}",
+              f"**Amount:** {format_token_amount(int(abs(token_amount) * (10 ** tracker.token_info.get('decimals', 0))), tracker.token_info)} {tracker.token_name}",
         inline=False
     )
     if tracker.image_url:
@@ -580,7 +581,7 @@ async def create_trade_embed(tracker, tx_type, ada_amount, token_amount, details
     embed.add_field(
         name="Trade Details",
         value=f"{'ADA Spent' if tx_type == 'buy' else 'ADA Received'}: {abs(ada_amount):,.2f} ADA\n"
-              f"{'Tokens Received' if tx_type == 'buy' else 'Tokens Sold'}: {format_token_amount(int(abs(token_amount) * (10 ** tracker.token_info.get('decimals', 0))), tracker.token_info.get('decimals', 0))} {tracker.token_name}\n"
+              f"{'Tokens Received' if tx_type == 'buy' else 'Tokens Sold'}: {format_token_amount(int(abs(token_amount) * (10 ** tracker.token_info.get('decimals', 0))), tracker.token_info)} {tracker.token_name}\n"
               f"Price/Token: {abs(ada_amount/token_amount):,.6f} ADA",
         inline=True
     )
@@ -604,7 +605,7 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
     if tx_type == 'transfer' and not tracker.track_transfers:
         logger.info(f"Skipping transfer notification for {tracker.token_name} - tracking disabled")
         return
-    decimals = tracker.token_info.get('decimals', 0)
+    decimals = tracker.token_info.get('decimals', 0) if tracker.token_info else 0
     formatted_amount = abs(token_amount) * (10 ** decimals) if decimals > 0 else abs(token_amount)
     if formatted_amount < tracker.threshold:
         logger.info(f"Skipping notification for {tracker.token_name} - amount {formatted_amount} below threshold {tracker.threshold}")
@@ -671,7 +672,7 @@ class TokenControls(discord.ui.View):
         else:
             await interaction.response.send_message("This token is not being tracked here.", ephemeral=True)
 
-    @discord.ui.button(label="Toggle Transfers", style=discord.ui.ButtonStyle.primary, emoji="🔄")
+    @discord.ui.button(label="Toggle Transfers", style=discord.ButtonStyle.primary, emoji="🔄")
     async def toggle_transfers(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Toggle transfer notification tracking for a token"""
         tracker_key = f"{self.policy_id}:{interaction.channel_id}"
