@@ -13,10 +13,10 @@ from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import hmac
-import time
 import hashlib
 import uvicorn
 import threading
+import time  # Added missing import
 from queue import Queue
 from sqlalchemy import create_engine, Column, Integer, String, Float, BigInteger, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
@@ -360,7 +360,7 @@ async def transaction_webhook(request: Request):
             raise HTTPException(status_code=400, detail="Missing Blockfrost-Signature header")
 
         payload = await request.body()
-        current_time = int(time.time())
+        current_time = int(time.time())  # Fixed by adding time import
         if not verify_webhook_signature(payload, signature, current_time):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
@@ -521,7 +521,7 @@ def analyze_transaction(tx_data, tracker) -> tuple | None:
                 'hash': tx_hash,
                 'inputs': [inp for inp in inputs if inp.get('address')],
                 'outputs': [out for out in outputs if out.get('address')]
-            }
+                }
 
         logger.debug(f"No significant transaction detected for {tracker.token_name}")
         return None
