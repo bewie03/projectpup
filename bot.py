@@ -16,7 +16,7 @@ import hmac
 import hashlib
 import uvicorn
 import threading
-import time  # Added missing import
+import time
 from queue import Queue
 from sqlalchemy import create_engine, Column, Integer, String, Float, BigInteger, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
@@ -360,7 +360,7 @@ async def transaction_webhook(request: Request):
             raise HTTPException(status_code=400, detail="Missing Blockfrost-Signature header")
 
         payload = await request.body()
-        current_time = int(time.time())  # Fixed by adding time import
+        current_time = int(time.time())
         if not verify_webhook_signature(payload, signature, current_time):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
@@ -521,7 +521,7 @@ def analyze_transaction(tx_data, tracker) -> tuple | None:
                 'hash': tx_hash,
                 'inputs': [inp for inp in inputs if inp.get('address')],
                 'outputs': [out for out in outputs if out.get('address')]
-                }
+            }
 
         logger.debug(f"No significant transaction detected for {tracker.token_name}")
         return None
@@ -626,9 +626,11 @@ async def send_transaction_notification(tracker, tx_type, ada_amount, token_amou
             logger.error(f"Failed to fetch channel {tracker.channel_id}: {str(e)}", exc_info=True)
             return
 
-    embed = await (create_transfer_embed if tx_type == 'transfer' else create_trade_embed)(
-        tracker, token_amount, details if tx_type == 'transfer' else (tx_type, ada_amount, token_amount, details)
-    )
+    # Ensure all required arguments are passed to embed creation functions
+    if tx_type == 'transfer':
+        embed = await create_transfer_embed(tracker, token_amount, details)
+    else:  # tx_type in ['buy', 'sell']
+        embed = await create_trade_embed(tracker, tx_type, ada_amount, token_amount, details)
     if not embed:
         logger.error(f"Failed to create embed for {tracker.token_name} ({tx_type})")
         return
