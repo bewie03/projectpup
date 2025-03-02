@@ -633,24 +633,22 @@ def analyze_transaction_improved(tx_details, policy_id):
         ada_out = ada_out / 1_000_000
         ada_delta = abs(ada_out - ada_in)
 
-        ada_amount = abs(ada_out - ada_in)
+        # For trades, use the actual token difference
+        raw_token_amount = abs(token_out - token_in)
+        
+        # For transfers, use the actual amount being moved
         if token_in > 0 and token_out > 0:
-            max_output = 0
+            # Find the actual transfer amount by looking at the output with the token
             for out in outputs:
                 for amount in out.get('amount', []):
                     unit = amount.get('unit', '')
                     if full_asset_name and unit == full_asset_name or unit.startswith(policy_id):
-                        output_amount = int(amount['quantity'])
-                        max_output = max(max_output, output_amount)
-            raw_token_amount = max_output
-            logger.info(f"Wallet transfer - using largest output amount: {raw_token_amount}")
-        else:
-            raw_token_amount = abs(token_out - token_in)
-            logger.info(f"Buy/Sell - using difference: {raw_token_amount}")
+                        raw_token_amount = int(amount['quantity'])
+                        break
         
+        # Convert to decimal representation
         token_amount = raw_token_amount / (10 ** decimals) if decimals > 0 else raw_token_amount
         logger.info(f"Raw token amount: {raw_token_amount}, Decimals: {decimals}, Converted: {token_amount}")
-
         logger.info(f"Token input: {token_in}, Token output: {token_out}")
         logger.info(f"ADA input: {ada_in}, ADA output: {ada_out}")
 
@@ -661,16 +659,21 @@ def analyze_transaction_improved(tx_details, policy_id):
             'token_out': token_out,
             'raw_token_amount': raw_token_amount,
             'decimals': decimals,
-            'full_asset_name': full_asset_name
+            'full_asset_name': full_asset_name,
+            'type': 'unknown'  # Will be set below
         }
         
         if ada_delta > 1.0:  # More than 1 ADA change indicates a trade
             if token_out > token_in:
+                details['type'] = 'buy'
                 return 'buy', ada_delta, token_amount, details
             else:
+                details['type'] = 'sell'
                 return 'sell', ada_delta, token_amount, details
         elif token_in > 0 and token_out > 0:
+            details['type'] = 'wallet_transfer'
             return 'wallet_transfer', ada_delta, token_amount, details
+        return None
     except Exception as e:
         logger.error(f"Error analyzing transaction: {str(e)}", exc_info=True)
         return 'unknown', 0, 0, {}
@@ -684,8 +687,8 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
         action_word = "Purchase" if trade_type == "buy" else "Sale"
         
         embed = discord.Embed(
-            title=f"{title_emoji} Token {action_word} Detected",
-            description=f"Transaction Hash: [`{tx_details.get('hash', '')[:8]}...{tx_details.get('hash', '')[-8:]}`](https://pool.pm/tx/{tx_details.get('hash', '')})",
+            title=f"{title_emoji} {tracker.token_name} {action_word} Detected",
+            description=f"Transaction Hash: [`{tx_details.get('hash', '')[:8]}...{tx_details.get('hash', '')[-8:]}`](https://cardanoscan.io/transaction/{tx_details.get('hash', '')})",
             color=discord.Color.green() if trade_type == "buy" else discord.Color.blue()
         )
 
@@ -698,37 +701,36 @@ async def create_trade_embed(tx_details, policy_id, ada_amount, token_amount, tr
         )
         embed.add_field(name="📝 Overview", value=overview, inline=True)
 
+        raw_token_amount = analysis_details.get('raw_token_amount', 0)
         if trade_type == "buy":
             trade_info = (
                 "```\n"
                 f"ADA Spent  : {ada_amount:,.2f}\n"
-                f"Tokens Recv: {format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}\n"
+                f"Tokens Recv: {format_token_amount(raw_token_amount, tracker.token_info.get('decimals', 0))}\n"
                 f"Price/Token: {(ada_amount/token_amount):.6f}\n"
                 "```"
             )
         else:
             trade_info = (
                 "```\n"
-                f"Tokens Sold: {format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))}\n"
+                f"Tokens Sold: {format_token_amount(raw_token_amount, tracker.token_info.get('decimals', 0))}\n"
                 f"ADA Recv   : {ada_amount:,.2f}\n"
                 f"Price/Token: {(ada_amount/token_amount):.6f}\n"
                 "```"
             )
         embed.add_field(name="💰 Trade Details", value=trade_info, inline=True)
 
-        if tracker.token_info:
-            token_name = tracker.token_info.get('name', 'Unknown Token')
-            embed.set_author(name=token_name)
-            if tracker.image_url:
-                embed.set_thumbnail(url=tracker.image_url)
+        embed.set_author(name=tracker.token_name)
+        if tracker.image_url:
+            embed.set_thumbnail(url=tracker.image_url)
 
         input_addresses = [inp.get('address', '') for inp in tx_details.get('inputs', [])]
         output_addresses = [out.get('address', '') for out in tx_details.get('outputs', [])]
         address_layout = []
-        in_addrs = ["📥 Input Addresses:"] + [f"{addr[:8]}..." for addr in input_addresses[:3]]
+        in_addrs = ["📥 Input Addresses:"] + [f"[{addr[:8]}...{addr[-8:]}](https://cardanoscan.io/address/{addr})" for addr in input_addresses[:3]]
         if len(input_addresses) > 3:
             in_addrs.append(f"...and {len(input_addresses) - 3} more")
-        out_addrs = ["📤 Output Addresses:"] + [f"{addr[:8]}..." for addr in output_addresses[:3]]
+        out_addrs = ["📤 Output Addresses:"] + [f"[{addr[:8]}...{addr[-8:]}](https://cardanoscan.io/address/{addr})" for addr in output_addresses[:3]]
         if len(output_addresses) > 3:
             out_addrs.append(f"...and {len(output_addresses) - 3} more")
         
@@ -753,33 +755,62 @@ async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
     """Creates an embed for token transfer notifications"""
     try:
         embed = discord.Embed(
-            title="↔️ Token Transfer Detected",
-            description="Tokens have been transferred between wallets.",
+            title=f"↔️ {tracker.token_name} Transfer Detected",
+            description=f"[View Transaction on CardanoScan](https://cardanoscan.io/transaction/{tx_details.get('hash', '')})",
             color=discord.Color.blue()
         )
-        from_address = tx_details.get('inputs', [{}])[0].get('address', '')
-        to_address = tx_details.get('outputs', [{}])[0].get('address', '')
-        
+
+        # Find the actual sending and receiving addresses
+        sender_address = None
+        receiver_address = None
+        token_unit = None
+
+        # First find the token unit we're tracking
+        for inp in tx_details.get('inputs', []):
+            for amount in inp.get('amount', []):
+                if amount.get('unit', '').startswith(policy_id):
+                    token_unit = amount.get('unit')
+                    break
+            if token_unit:
+                break
+
+        # Now find the actual sender and receiver
+        if token_unit:
+            # Find sender (address that had tokens in input)
+            for inp in tx_details.get('inputs', []):
+                for amount in inp.get('amount', []):
+                    if amount.get('unit') == token_unit:
+                        sender_address = inp.get('address')
+                        break
+                if sender_address:
+                    break
+
+            # Find receiver (address that has tokens in output)
+            for out in tx_details.get('outputs', []):
+                for amount in out.get('amount', []):
+                    if amount.get('unit') == token_unit:
+                        receiver_address = out.get('address')
+                        break
+                if receiver_address:
+                    break
+
+        if not sender_address:
+            sender_address = tx_details.get('inputs', [{}])[0].get('address', 'Unknown')
+        if not receiver_address:
+            receiver_address = tx_details.get('outputs', [{}])[0].get('address', 'Unknown')
+
         transfer_details = (
-            f"**From:** ```{from_address[:20]}...{from_address[-8:]}```\n"
-            f"**To:** ```{to_address[:20]}...{to_address[-8:]}```\n"
-            f"**Amount:** ```{format_token_amount(int(token_amount * 10**tracker.token_info.get('decimals', 0)), tracker.token_info.get('decimals', 0))} Tokens```"
+            f"**From:** [`{sender_address[:8]}...{sender_address[-8:]}`](https://cardanoscan.io/address/{sender_address})\n"
+            f"**To:** [`{receiver_address[:8]}...{receiver_address[-8:]}`](https://cardanoscan.io/address/{receiver_address})\n"
+            f"**Amount:** ```{format_token_amount(int(token_amount), tracker.token_info.get('decimals', 0))} {tracker.token_name}```"
         )
         embed.add_field(name="🔄 Transfer Details", value=transfer_details, inline=False)
         
-        wallet_links = (
-            f"[View Sender Wallet](https://cardanoscan.io/address/{from_address})\n"
-            f"[View Receiver Wallet](https://cardanoscan.io/address/{to_address})"
-        )
-        embed.add_field(name="👤 Wallet Profiles", value=wallet_links, inline=False)
+        embed.add_field(name="🔑 Policy ID", value=f"```{policy_id}```", inline=False)
         
-        embed.add_field(
-            name="🔍 Transaction Details",
-            value=f"[View on CardanoScan](https://cardanoscan.io/transaction/{tx_details.get('hash', '')})",
-            inline=False
-        )
+        if tracker.image_url:
+            embed.set_thumbnail(url=tracker.image_url)
         
-        embed.set_thumbnail(url=tracker.image_url)
         embed.timestamp = discord.utils.utcnow()
         embed.set_footer(text=f"Transfer detected at • Block #{tx_details.get('block_height', '')}")
         
@@ -787,7 +818,6 @@ async def create_transfer_embed(tx_details, policy_id, token_amount, tracker):
     except Exception as e:
         logger.error(f"Error creating transfer embed: {str(e)}", exc_info=True)
         return None
-
 def shorten_address(address):
     """Shortens a Cardano address for display"""
     if not address:
