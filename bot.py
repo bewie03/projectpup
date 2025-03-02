@@ -400,8 +400,11 @@ async def transaction_webhook(request: Request):
                     'outputs': outputs,
                     'tx': tx
                 }
-                tx_type, ada_amount, token_amount, details = analyze_transaction_improved(analysis_data, active_tracker.policy_id)
-                details['hash'] = tx_hash
+                analysis_result = analyze_transaction_improved(analysis_data, active_tracker.policy_id)
+                if analysis_result is None:
+                    logger.info(f"❌ No relevant transaction data found for {active_tracker.token_name}")
+                    continue
+                tx_type, ada_amount, token_amount, details = analysis_result
                 logger.info(f"📊 Analysis results: type={tx_type}, ADA={ada_amount:.2f}, Tokens={token_amount:.2f}")
                 
                 if tx_type:  # Only queue if we found a relevant transaction
